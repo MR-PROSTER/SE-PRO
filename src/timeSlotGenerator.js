@@ -1,5 +1,6 @@
 /**
- * timeSlotGenerator.js - Dynamic time slot generator
+ * timeSlotGenerator.js - Dynamic time slot generator with dual-duration support
+ * Generates 60min (1hr) and 90min (1.5hr) slots with 15min gaps between classes
  */
 
 /**
@@ -7,20 +8,18 @@
  * @param {Object} config - Time slot configuration
  * @param {string} config.startTime - Start time in HH:MM format (e.g., "09:00")
  * @param {string} config.endTime - End time in HH:MM format (e.g., "18:00")
- * @param {number} config.periodDuration - Minutes per class period (default: 55)
+ * @param {number} config.gapDuration - Gap between classes in minutes (default: 15)
  * @param {number} config.breakAfterPeriod - Insert lunch after this many periods (default: 4)
  * @param {number} config.lunchDuration - Lunch break duration in minutes (default: 60)
- * @param {number} config.shortBreakDuration - Gap between periods in minutes (default: 5)
  * @returns {Object} { days: string[], slots: Array, breakSlots: Array }
  */
 function generateTimeSlots(config) {
   const {
     startTime = "09:00",
     endTime = "18:00",
-    periodDuration = 55,
+    gapDuration = 15,
     breakAfterPeriod = 4,
-    lunchDuration = 60,
-    shortBreakDuration = 5
+    lunchDuration = 60
   } = config;
 
   const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
@@ -52,6 +51,7 @@ function generateTimeSlots(config) {
           label: "Lunch Break",
           start: formatTime(currentMinutes),
           end: formatTime(lunchEndMinutes),
+          duration: lunchDuration,
           is_break: true
         });
         slotId++;
@@ -61,30 +61,79 @@ function generateTimeSlots(config) {
       }
     }
 
-    // Calculate period end time
-    const periodEndMinutes = currentMinutes + periodDuration;
+    // Generate both 60min and 90min slots from the same timeline
+    // Each slot type gets its own entry but they share the timeline
 
-    // Check if period fits before end time
-    if (periodEndMinutes > endMinutes) {
-      break; // Not enough time for another period
+    // 60-minute slot (1hr)
+    const period60EndMinutes = currentMinutes + 60;
+    if (period60EndMinutes <= endMinutes) {
+      slots.push({
+        id: slotId,
+        label: `${formatTime(currentMinutes)}-${formatTime(period60EndMinutes)}`,
+        start: formatTime(currentMinutes),
+        end: formatTime(period60EndMinutes),
+        duration: 60,
+        is_break: false
+      });
+      slotId++;
     }
 
-    // Add the period slot
-    slots.push({
-      id: slotId,
-      label: `${formatTime(currentMinutes)}-${formatTime(periodEndMinutes)}`,
-      start: formatTime(currentMinutes),
-      end: formatTime(periodEndMinutes),
-      is_break: false
-    });
-    slotId++;
+    // 90-minute slot (1.5hr) - starts at same time, extends further
+    const period90EndMinutes = currentMinutes + 90;
+    if (period90EndMinutes <= endMinutes) {
+      slots.push({
+        id: slotId,
+        label: `${formatTime(currentMinutes)}-${formatTime(period90EndMinutes)}`,
+        start: formatTime(currentMinutes),
+        end: formatTime(period90EndMinutes),
+        duration: 90,
+        is_break: false
+      });
+      slotId++;
+    }
 
-    // Move current time forward by period duration + short break
-    currentMinutes = periodEndMinutes + shortBreakDuration;
+    // Move current time forward by the longer period + gap
+    // The 90min slot determines when the next block can start
+    currentMinutes = period90EndMinutes + gapDuration;
     periodsSinceLunch++;
   }
 
   return { days, slots, breakSlots };
+}
+
+/**
+ * Get slots that overlap with a given time range
+ * @param {Array} slots - All slot objects
+ * @param {string} day - Day name
+ * @param {number} slotId - The slot ID to check overlaps for
+ * @returns {Array<number>} Array of slot IDs that overlap with the given slot
+ */
+function getSlotsInTimeRange(slots, day, slotId) {
+  const targetSlot = slots.find(s => s.id === slotId);
+  if (!targetSlot) return [];
+
+  const targetStart = timeToMinutes(targetSlot.start);
+  const targetEnd = timeToMinutes(targetSlot.end);
+
+  const overlappingSlots = slots.filter(s => {
+    if (s.id === slotId) return true; // Include self
+    const slotStart = timeToMinutes(s.start);
+    const slotEnd = timeToMinutes(s.end);
+    // Check for any overlap
+    return slotStart < targetEnd && slotEnd > targetStart;
+  });
+
+  return overlappingSlots.map(s => s.id);
+}
+
+/**
+ * Convert time string to minutes since midnight
+ * @param {string} time - Time in H:MM or HH:MM format
+ * @returns {number} Minutes since midnight
+ */
+function timeToMinutes(time) {
+  const [hour, min] = time.split(':').map(Number);
+  return hour * 60 + min;
 }
 
 /**
@@ -105,22 +154,23 @@ function formatTime(totalMinutes) {
 
 module.exports = {
   generateTimeSlots,
-  formatTime
+  formatTime,
+  timeToMinutes,
+  getSlotsInTimeRange
 };
 
 // Test code - runs only when executed directly
 if (require.main === module) {
-  console.log('=== Time Slot Generator Tests ===\n');
+  console.log('=== Time Slot Generator Tests (Dual Duration) ===\n');
 
-  // Test 1: Default configuration
-  console.log('Test 1: Default configuration (55 min periods, lunch after 4)');
+  // Test 1: Default configuration with dual-duration slots
+  console.log('Test 1: Default configuration (60/90 min slots, 15min gaps)');
   const config1 = {
     startTime: "09:00",
     endTime: "18:00",
-    periodDuration: 55,
+    gapDuration: 15,
     breakAfterPeriod: 4,
-    lunchDuration: 60,
-    shortBreakDuration: 5
+    lunchDuration: 60
   };
   const result1 = generateTimeSlots(config1);
   console.log(`Days: ${result1.days.join(', ')}`);
@@ -128,41 +178,31 @@ if (require.main === module) {
   console.log(`Break slots: ${result1.breakSlots.join(', ')}`);
   console.log('Slots:');
   result1.slots.forEach(s => {
-    console.log(`  ${s.id}: ${s.label}${s.is_break ? ' (BREAK)' : ''}`);
+    console.log(`  ${s.id}: ${s.label} (${s.duration}min)${s.is_break ? ' (BREAK)' : ''}`);
   });
 
-  // Test 2: 50 minute periods
-  console.log('\nTest 2: 50 minute periods');
-  const config2 = {
-    startTime: "09:00",
-    endTime: "18:00",
-    periodDuration: 50,
-    breakAfterPeriod: 4,
-    lunchDuration: 60,
-    shortBreakDuration: 5
-  };
-  const result2 = generateTimeSlots(config2);
-  console.log(`Total slots: ${result2.slots.length}`);
-  console.log('Slots:');
-  result2.slots.forEach(s => {
-    console.log(`  ${s.id}: ${s.label}${s.is_break ? ' (BREAK)' : ''}`);
-  });
+  // Test 2: getSlotsInTimeRange
+  console.log('\nTest 2: getSlotsInTimeRange - overlap detection');
+  const slot90 = result1.slots.find(s => s.duration === 90);
+  if (slot90) {
+    const overlapping = getSlotsInTimeRange(result1.slots, 'Monday', slot90.id);
+    console.log(`  90min slot ${slot90.id} (${slot90.label}) overlaps with: ${overlapping.join(', ')}`);
+  }
 
   // Test 3: Early dismissal
   console.log('\nTest 3: Early dismissal (9:00-14:00)');
   const config3 = {
     startTime: "09:00",
     endTime: "14:00",
-    periodDuration: 55,
+    gapDuration: 15,
     breakAfterPeriod: 3,
-    lunchDuration: 45,
-    shortBreakDuration: 5
+    lunchDuration: 45
   };
   const result3 = generateTimeSlots(config3);
   console.log(`Total slots: ${result3.slots.length}`);
   console.log('Slots:');
   result3.slots.forEach(s => {
-    console.log(`  ${s.id}: ${s.label}${s.is_break ? ' (BREAK)' : ''}`);
+    console.log(`  ${s.id}: ${s.label} (${s.duration}min)${s.is_break ? ' (BREAK)' : ''}`);
   });
 
   console.log('\n=== All tests complete! ===');

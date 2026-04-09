@@ -1,16 +1,56 @@
 /**
  * RoomSelector - Utility for selecting appropriate rooms based on session type
- * Manages room bookings and capacity constraints
+ * Uses real room capacities (48/120/240) and facility matching
  */
 class RoomSelector {
   /**
-   * @param {Array} rooms - Array of { room_id, name, capacity, type }
+   * @param {Array} rooms - Array of { room_id, name, capacity, type, equipment }
    */
   constructor(rooms) {
-    this.rooms = rooms;
+    // Separate rooms into categories based on capacity and type
+    this.labs48 = [];
+    this.classrooms48 = [];
+    this.halls120 = [];
+    this.halls240 = [];
 
-    // Bookings map: Map<"day-slot", Set<room_id>>
+    for (const room of rooms) {
+      const normalizedType = this._normalizeRoomType(room.type);
+      const capacity = room.capacity;
+
+      if (normalizedType === 'lab') {
+        this.labs48.push(room);
+      } else if (normalizedType === 'classroom') {
+        this.classrooms48.push(room);
+      } else if (normalizedType === 'hall') {
+        if (capacity >= 200) {
+          this.halls240.push(room);
+        } else {
+          this.halls120.push(room);
+        }
+      }
+    }
+
+    // Sort each category by room_id for consistent ordering
+    this.labs48.sort((a, b) => a.room_id.localeCompare(b.room_id));
+    this.classrooms48.sort((a, b) => a.room_id.localeCompare(b.room_id));
+    this.halls120.sort((a, b) => a.room_id.localeCompare(b.room_id));
+    this.halls240.sort((a, b) => a.room_id.localeCompare(b.room_id));
+
+    // Booking map: Map<"day-slot", Set<room_id>>
     this.bookings = new Map();
+  }
+
+  /**
+   * Normalize room type to lowercase base type
+   * @param {string} type - Raw room type from CSV
+   * @returns {string} Normalized type: 'classroom', 'lab', or 'hall'
+   */
+  _normalizeRoomType(type) {
+    const lowerType = type.toLowerCase();
+    if (lowerType.includes('classroom')) return 'classroom';
+    if (lowerType.includes('lab')) return 'lab';
+    if (lowerType.includes('hall')) return 'hall';
+    return lowerType; // fallback
   }
 
   /**
@@ -48,266 +88,177 @@ class RoomSelector {
   }
 
   /**
-   * Check if a room has all required equipment
-   * @param {Array<string>} roomEquipment - Room's equipment list
-   * @param {Array<string>} requirements - Required equipment
+   * Get room tier based on enrolled students
+   * @param {number} enrolledCount - Number of enrolled students
+   * @returns {string} 'small' (48), 'medium' (120), or 'large' (240)
+   */
+  getRoomTier(enrolledCount) {
+    if (enrolledCount <= 48 || enrolledCount === 0) {
+      return 'small';  // 48-cap room
+    } else if (enrolledCount <= 120) {
+      return 'medium'; // 120-cap hall
+    } else {
+      return 'large';  // 240-cap hall
+    }
+  }
+
+  /**
+   * Get lab preference based on course title keywords
+   * @param {string} courseTitle - Course title
+   * @returns {string|null} 'Computers', 'Hardware', or null
+   */
+  getLabPreference(courseTitle) {
+    if (!courseTitle) return null;
+    const title = courseTitle.toLowerCase();
+
+    // Computers lab keywords
+    const computersKeywords = [
+      'computer', 'programming', 'software', 'data', 'algorithm',
+      'database', 'web', 'cloud', 'ai', 'ml', 'machine learning',
+      'deep learning', 'nlp', 'virtualisation', 'security', 'privacy',
+      'architecture', 'gpu', 'distributed', 'parallel'
+    ];
+
+    // Hardware lab keywords
+    const hardwareKeywords = [
+      'hardware', 'circuit', 'embedded', 'iot', 'sensor', 'device',
+      'vlsi', 'rf', 'analog', 'digital', 'fpga', 'microcontroller',
+      'electronics', 'power', 'energy', 'communication', 'wireless',
+      'network', 'signal', 'image', 'vision', 'robotics', 'automation'
+    ];
+
+    for (const keyword of computersKeywords) {
+      if (title.includes(keyword)) {
+        return 'Computers';
+      }
+    }
+
+    for (const keyword of hardwareKeywords) {
+      if (title.includes(keyword)) {
+        return 'Hardware';
+      }
+    }
+
+    return null; // No preference
+  }
+
+  /**
+   * Check if room has required facility
+   * @param {Array<string>} roomFacilities - Room's facilities list
+   * @param {string} requiredFacility - Required facility (e.g., 'Computers')
    * @returns {boolean}
    */
-  _hasRequiredEquipment(roomEquipment, requirements) {
-    if (!requirements || requirements.length === 0) {
-      return true; // No requirements means any room is fine
-    }
-    return requirements.every(req => roomEquipment.includes(req));
+  _hasFacility(roomFacilities, requiredFacility) {
+    if (!roomFacilities || !requiredFacility) return true;
+    return roomFacilities.some(f =>
+      f.toLowerCase().includes(requiredFacility.toLowerCase())
+    );
   }
 
   /**
-   * Get capacity tier for a given section strength
-   * Capacity tiers with ±10 tolerance:
-   * - Small:  30-60   → strength <= 48
-   * - Medium: 86-106  → strength 49-96
-   * - Large:  120-140 → strength 97-130
-   * - Hall:   230-250 → strength 131-240
-   * @param {number} sectionStrength
-   * @returns {{ tier: string, minCap: number, maxCap: number }}
-   */
-  _getCapacityTier(sectionStrength) {
-    if (sectionStrength <= 48) {
-      return { tier: 'small', minCap: 30, maxCap: 60 };
-    } else if (sectionStrength <= 96) {
-      return { tier: 'medium', minCap: 86, maxCap: 106 };
-    } else if (sectionStrength <= 130) {
-      return { tier: 'large', minCap: 120, maxCap: 140 };
-    } else {
-      return { tier: 'hall', minCap: 230, maxCap: 250 };
-    }
-  }
-
-  /**
-   * Find room using tiered capacity logic based on actual section strength
+   * Find an appropriate room based on session type and enrolled students
    * @param {string} sessionType - 'L', 'T', or 'P'
-   * @param {number} sectionStrength - Number of students
-   * @param {string} day
-   * @param {number} slotId
-   * @param {Array<string>} requirements - Required equipment
+   * @param {number} enrolledCount - Number of enrolled students
+   * @param {string} courseTitle - Course title for lab preference
+   * @param {string} day - Day name
+   * @param {number} slotId - Slot ID
    * @param {string} courseCode - Course code for logging
    * @returns {{ room_id, name, capacity, type } | null}
    */
-  findRoomByStrength(sessionType, sectionStrength, day, slotId, requirements = [], courseCode = '') {
-    const key = this._makeKey(day, slotId);
-    const bookedRooms = this._getBookedRooms(key);
-    const tier = this._getCapacityTier(sectionStrength);
-
-    // For lab sessions (P type), use lab-specific logic
-    if (sessionType === 'P') {
-      // Find labs within appropriate capacity tier
-      const matchingLabs = this.rooms
-        .filter(room =>
-          room.type === 'lab' &&
-          !bookedRooms.has(room.room_id) &&
-          room.capacity >= sectionStrength &&
-          room.capacity <= tier.maxCap + 10 && // ±10 tolerance
-          this._hasRequiredEquipment(room.equipment, requirements)
-        )
-        .sort((a, b) => a.capacity - b.capacity);
-
-      if (matchingLabs.length > 0) {
-        return matchingLabs[0];
-      }
-
-      // Fallback: any lab that fits (without equipment match)
-      const fallbackLabs = this.rooms
-        .filter(room =>
-          room.type === 'lab' &&
-          !bookedRooms.has(room.room_id) &&
-          room.capacity >= sectionStrength
-        )
-        .sort((a, b) => a.capacity - b.capacity);
-
-      if (fallbackLabs.length > 0) {
-        if (courseCode && requirements.length > 0) {
-          console.warn(`Room without required equipment assigned for ${courseCode}`);
-        }
-        return fallbackLabs[0];
-      }
-
-      return null;
-    }
-
-    // For L/T sessions, use tiered classroom selection
-    if (sessionType === 'L' || sessionType === 'T') {
-      // Step 1: Find rooms in the appropriate tier with equipment match
-      const tierRooms = this.rooms
-        .filter(room =>
-          (room.type === 'classroom' || room.type === 'hall') &&
-          !bookedRooms.has(room.room_id) &&
-          room.capacity >= sectionStrength &&
-          room.capacity <= tier.maxCap + 10 && // ±10 tolerance
-          this._hasRequiredEquipment(room.equipment, requirements)
-        )
-        .sort((a, b) => a.capacity - b.capacity);
-
-      if (tierRooms.length > 0) {
-        return tierRooms[0];
-      }
-
-      // Step 2: Fallback - classroom without equipment match in tier
-      const fallbackClassrooms = this.rooms
-        .filter(room =>
-          room.type === 'classroom' &&
-          !bookedRooms.has(room.room_id) &&
-          room.capacity >= sectionStrength &&
-          room.capacity <= tier.maxCap + 10
-        )
-        .sort((a, b) => a.capacity - b.capacity);
-
-      if (fallbackClassrooms.length > 0) {
-        if (courseCode && requirements.length > 0) {
-          console.warn(`Room without required equipment assigned for ${courseCode}`);
-        }
-        return fallbackClassrooms[0];
-      }
-
-      // Step 3: Try larger tier (but still prefer smallest available)
-      const largerRooms = this.rooms
-        .filter(room =>
-          room.type === 'classroom' &&
-          !bookedRooms.has(room.room_id) &&
-          room.capacity >= sectionStrength
-        )
-        .sort((a, b) => a.capacity - b.capacity);
-
-      if (largerRooms.length > 0) {
-        if (courseCode && requirements.length > 0) {
-          console.warn(`Room without required equipment assigned for ${courseCode}`);
-        }
-        return largerRooms[0];
-      }
-
-      // Step 4: Hall as last resort
-      const halls = this.rooms
-        .filter(room =>
-          room.type === 'hall' &&
-          !bookedRooms.has(room.room_id) &&
-          room.capacity >= sectionStrength
-        )
-        .sort((a, b) => a.capacity - b.capacity);
-
-      if (halls.length > 0) {
-        if (courseCode && requirements.length > 0) {
-          console.warn(`Room without required equipment assigned for ${courseCode}`);
-        }
-        return halls[0];
-      }
-
-      return null;
-    }
-
-    return null;
-  }
-
-  /**
-   * Find an appropriate room based on session type and constraints
-   * @param {string} sessionType - 'L', 'T', or 'P'
-   * @param {number} sectionStrength - Number of students
-   * @param {string} day
-   * @param {number} slotId
-   * @param {Array<string>} requirements - Required equipment (e.g., ['Computers', 'Whiteboard'])
-   * @param {string} courseCode - Course code for logging warnings
-   * @returns {{ room_id, name, capacity, type } | null}
-   */
-  findRoom(sessionType, sectionStrength, day, slotId, requirements = [], courseCode = '') {
+  findRoom(sessionType, enrolledCount, courseTitle, day, slotId, courseCode = '') {
     const key = this._makeKey(day, slotId);
     const bookedRooms = this._getBookedRooms(key);
 
     if (sessionType === 'P') {
       // Practical sessions require a lab
-      // First, try to find a lab with required equipment
-      const matchingLabs = this.rooms
-        .filter(room =>
-          room.type === 'lab' &&
-          !bookedRooms.has(room.room_id) &&
-          this._hasRequiredEquipment(room.equipment, requirements)
-        )
-        .sort((a, b) => a.capacity - b.capacity);
+      const labPreference = this.getLabPreference(courseTitle);
 
-      if (matchingLabs.length > 0) {
-        return matchingLabs[0];
+      // Filter labs that are not booked
+      const availableLabs = this.labs48.filter(room =>
+        !bookedRooms.has(room.room_id)
+      );
+
+      if (availableLabs.length === 0) {
+        console.error(`No lab available for ${courseCode} at ${day} slot ${slotId}`);
+        return null;
       }
 
-      // Fallback: any lab (without required equipment)
-      for (const room of this.rooms) {
-        if (room.type === 'lab' && !bookedRooms.has(room.room_id)) {
-          if (courseCode && requirements.length > 0) {
-            console.warn(`Room without required equipment assigned for ${courseCode}`);
-          }
-          return room;
+      // If there's a preference, try to find matching lab first
+      if (labPreference) {
+        const matchingLabs = availableLabs.filter(room =>
+          this._hasFacility(room.facilities, labPreference)
+        );
+        if (matchingLabs.length > 0) {
+          return matchingLabs[0];
         }
+        // No matching lab, fall through to any available lab
+        console.warn(`No ${labPreference} lab available for ${courseCode}, using any lab`);
       }
-      return null;
+
+      // Return any available lab
+      return availableLabs[0];
     }
 
     if (sessionType === 'L' || sessionType === 'T') {
-      // Lecture/Tutorial: prefer classroom with sufficient capacity and required equipment
-      const suitableClassrooms = this.rooms
-        .filter(room =>
-          room.type === 'classroom' &&
-          room.capacity >= sectionStrength &&
-          !bookedRooms.has(room.room_id) &&
-          this._hasRequiredEquipment(room.equipment, requirements)
-        )
-        .sort((a, b) => a.capacity - b.capacity); // Prefer smallest adequate room
+      const tier = this.getRoomTier(enrolledCount);
+      let candidates = [];
+      let usedTier = tier;
 
-      if (suitableClassrooms.length > 0) {
-        return suitableClassrooms[0];
+      // Select candidate pool based on tier
+      if (tier === 'small') {
+        candidates = this.classrooms48;
+      } else if (tier === 'medium') {
+        candidates = this.halls120;
+      } else { // large
+        candidates = this.halls240;
       }
 
-      // Fallback: classroom without required equipment
-      const fallbackClassrooms = this.rooms
-        .filter(room =>
-          room.type === 'classroom' &&
-          room.capacity >= sectionStrength &&
-          !bookedRooms.has(room.room_id)
-        )
-        .sort((a, b) => a.capacity - b.capacity);
+      // Filter out booked rooms
+      let available = candidates.filter(room =>
+        !bookedRooms.has(room.room_id)
+      );
 
-      if (fallbackClassrooms.length > 0) {
-        if (courseCode && requirements.length > 0) {
-          console.warn(`Room without required equipment assigned for ${courseCode}`);
+      // If no room available in current tier, bump up
+      if (available.length === 0) {
+        if (tier === 'small') {
+          // Bump to medium (halls120)
+          usedTier = 'medium';
+          available = this.halls120.filter(room =>
+            !bookedRooms.has(room.room_id)
+          );
+          if (available.length === 0) {
+            // Bump to large (halls240)
+            usedTier = 'large';
+            available = this.halls240.filter(room =>
+              !bookedRooms.has(room.room_id)
+            );
+          }
+        } else if (tier === 'medium') {
+          // Bump to large (halls240)
+          usedTier = 'large';
+          available = this.halls240.filter(room =>
+            !bookedRooms.has(room.room_id)
+          );
         }
-        return fallbackClassrooms[0];
+        // If still no room, return null
       }
 
-      // Fallback to hall if no classroom available
-      const halls = this.rooms
-        .filter(room =>
-          room.type === 'hall' &&
-          room.capacity >= sectionStrength &&
-          !bookedRooms.has(room.room_id) &&
-          this._hasRequiredEquipment(room.equipment, requirements)
-        )
-        .sort((a, b) => a.capacity - b.capacity);
-
-      if (halls.length > 0) {
-        return halls[0];
+      if (available.length === 0) {
+        console.error(`No room available for ${courseCode} at ${day} slot ${slotId} (tier: ${tier}, bumped to: ${usedTier})`);
+        return null;
       }
 
-      // Fallback: hall without required equipment
-      const fallbackHalls = this.rooms
-        .filter(room =>
-          room.type === 'hall' &&
-          room.capacity >= sectionStrength &&
-          !bookedRooms.has(room.room_id)
-        )
-        .sort((a, b) => a.capacity - b.capacity);
-
-      if (fallbackHalls.length > 0) {
-        if (courseCode && requirements.length > 0) {
-          console.warn(`Room without required equipment assigned for ${courseCode}`);
-        }
-        return fallbackHalls[0];
+      // Log warning if bumped up
+      if (usedTier !== tier) {
+        console.warn(`No room in ${tier} tier for ${courseCode}, bumped to ${usedTier}`);
       }
 
-      return null;
+      // Log warning if using hall for small class
+      if (usedTier !== 'small' && enrolledCount <= 48 && enrolledCount > 0) {
+        console.warn(`Hall assigned for ${courseCode} with ${enrolledCount} students (should use classroom)`);
+      }
+
+      return available[0];
     }
 
     return null;
@@ -335,7 +286,6 @@ class RoomSelector {
     const bookedRooms = this.bookings.get(key);
     if (bookedRooms) {
       bookedRooms.delete(roomId);
-      // Clean up empty sets
       if (bookedRooms.size === 0) {
         this.bookings.delete(key);
       }
@@ -364,89 +314,138 @@ class RoomSelector {
     }
     return summary;
   }
+
+  /**
+   * Get room counts by category
+   * @returns {Object} Room counts
+   */
+  getRoomCounts() {
+    return {
+      labs48: this.labs48.length,
+      classrooms48: this.classrooms48.length,
+      halls120: this.halls120.length,
+      halls240: this.halls240.length
+    };
+  }
 }
 
 // Test code - runs only when executed directly
 if (require.main === module) {
-  console.log('=== RoomSelector Tests ===\n');
+  console.log('=== RoomSelector Tests (Real Capacity Tiers) ===\n');
 
-  const mockRooms = [
-    { room_id: 'R101', name: 'Room 101', capacity: 60, type: 'classroom' },
-    { room_id: 'R102', name: 'Room 102', capacity: 60, type: 'classroom' },
-    { room_id: 'L201', name: 'Lab 201', capacity: 30, type: 'lab' },
-    { room_id: 'L202', name: 'Lab 202', capacity: 30, type: 'lab' },
-    { room_id: 'H301', name: 'Hall 301', capacity: 120, type: 'hall' }
+  // Real rooms from data
+  const realRooms = [
+    { room_id: 'C101', name: 'Room C101', capacity: 48, type: 'Classroom', facilities: ['Whiteboard', 'Display Screen'] },
+    { room_id: 'C102', name: 'Room C102', capacity: 48, type: 'Classroom', facilities: ['Whiteboard', 'Display Screen'] },
+    { room_id: 'C104', name: 'Room C104', capacity: 48, type: 'Classroom', facilities: ['Whiteboard', 'Display Screen'] },
+    { room_id: 'L105', name: 'Lab L105', capacity: 48, type: 'Lab', facilities: ['Hardware', 'Whiteboard'] },
+    { room_id: 'L106', name: 'Lab L106', capacity: 48, type: 'Lab', facilities: ['Computers', 'Whiteboard'] },
+    { room_id: 'L107', name: 'Lab L107', capacity: 48, type: 'Lab', facilities: ['Computers', 'Whiteboard'] },
+    { room_id: 'C002', name: 'Hall C002', capacity: 120, type: '120-Seater Hall', facilities: ['Projector', 'Whiteboard'] },
+    { room_id: 'C003', name: 'Hall C003', capacity: 120, type: '120-Seater Hall', facilities: ['Projector', 'Whiteboard'] },
+    { room_id: 'C004', name: 'Hall C004', capacity: 240, type: '240-Seater Hall', facilities: ['Projector', 'Whiteboard'] }
   ];
 
-  const selector = new RoomSelector(mockRooms);
+  const selector = new RoomSelector(realRooms);
+  const counts = selector.getRoomCounts();
+  console.log('Room counts:', counts);
+  console.assert(counts.labs48 === 3, 'Should have 3 labs');
+  console.assert(counts.classrooms48 === 3, 'Should have 3 classrooms');
+  console.assert(counts.halls120 === 2, 'Should have 2 halls-120');
+  console.assert(counts.halls240 === 1, 'Should have 1 hall-240');
 
-  // Test 1: Find lab for practical session
-  console.log('Test 1: findRoom for Practical (P)');
-  const lab = selector.findRoom('P', 30, 'Monday', 1);
-  console.log(`  Found: ${JSON.stringify(lab)}`);
-  console.assert(lab?.type === 'lab', 'Should return a lab');
+  // Test 1: Small class (<=48) gets classroom
+  console.log('\nTest 1: 35 students → 48-cap classroom');
+  const room1 = selector.findRoom('L', 35, 'Programming Fundamentals', 'Monday', 1, 'CS101');
+  console.log(`  Found: ${room1?.name} (capacity ${room1?.capacity})`);
+  console.assert(room1?.capacity === 48, 'Should return 48-cap room');
+  console.assert(room1?.room_id.startsWith('C'), 'Should return classroom');
 
-  // Test 2: Find classroom for lecture
-  console.log('\nTest 2: findRoom for Lecture (L)');
-  const classroom = selector.findRoom('L', 60, 'Monday', 1);
-  console.log(`  Found: ${JSON.stringify(classroom)}`);
-  console.assert(classroom?.type === 'classroom', 'Should return a classroom');
-  console.assert(classroom?.capacity >= 60, 'Capacity should be >= 60');
+  // Test 2: Medium class (49-120) gets 120-cap hall
+  console.log('\nTest 2: 98 students → 120-cap hall');
+  const selector2 = new RoomSelector(realRooms);
+  const room2 = selector2.findRoom('L', 98, 'Full Stack Development', 'Monday', 1, 'DA352');
+  console.log(`  Found: ${room2?.name} (capacity ${room2?.capacity})`);
+  console.assert(room2?.capacity === 120, 'Should return 120-cap hall');
 
-  // Test 3: Find room for tutorial
-  console.log('\nTest 3: findRoom for Tutorial (T)');
-  const tutorial = selector.findRoom('T', 30, 'Monday', 1);
-  console.log(`  Found: ${JSON.stringify(tutorial)}`);
-  console.assert(tutorial?.type === 'classroom', 'Should return a classroom');
+  // Test 3: Large class (>120) gets 240-cap hall
+  console.log('\nTest 3: 120 students → 120-cap hall');
+  const selector3 = new RoomSelector(realRooms);
+  const room3 = selector3.findRoom('L', 120, 'NLP', 'Monday', 1, 'CS458');
+  console.log(`  Found: ${room3?.name} (capacity ${room3?.capacity})`);
+  console.assert(room3?.capacity === 120, 'Should return 120-cap hall');
 
-  // Test 4: Book a room and verify it's not returned again
-  console.log('\nTest 4: bookRoom and verify exclusion');
-  selector.bookRoom('R101', 'Monday', 1);
-  const afterBook = selector.findRoom('L', 60, 'Monday', 1);
-  console.log(`  After booking R101: ${JSON.stringify(afterBook)}`);
-  console.assert(afterBook?.room_id !== 'R101', 'Should not return booked room');
+  // Test 4: 0 enrolled gets smallest room
+  console.log('\nTest 4: 0 enrolled → 48-cap room');
+  const selector4 = new RoomSelector(realRooms);
+  const room4 = selector4.findRoom('L', 0, 'Empty Course', 'Monday', 1, 'EC363');
+  console.log(`  Found: ${room4?.name} (capacity ${room4?.capacity})`);
+  console.assert(room4?.capacity === 48, 'Should return 48-cap room for 0 enrolled');
 
-  // Test 5: releaseRoom
-  console.log('\nTest 5: releaseRoom');
-  selector.releaseRoom('R101', 'Monday', 1);
-  const afterRelease = selector.findRoom('L', 60, 'Monday', 1);
-  console.log(`  After releasing R101: ${JSON.stringify(afterRelease)}`);
-  console.assert(afterRelease?.room_id === 'R101', 'Should be able to book R101 again');
+  // Test 5: Lab with Computers preference
+  console.log('\nTest 5: Programming course → Computers lab');
+  const selector5 = new RoomSelector(realRooms);
+  const lab5 = selector5.findRoom('P', 30, 'Data Structures Programming', 'Monday', 1, 'CS163');
+  console.log(`  Found: ${lab5?.name} (facilities: ${lab5?.facilities?.join(', ')})`);
+  console.assert(lab5?.facilities?.includes('Computers'), 'Should return Computers lab');
 
-  // Test 6: Hall fallback when no classroom available
-  console.log('\nTest 6: Hall fallback');
-  const selector2 = new RoomSelector(mockRooms);
+  // Test 6: Lab with Hardware preference
+  console.log('\nTest 6: Hardware course → Hardware lab');
+  const selector6 = new RoomSelector(realRooms);
+  const lab6 = selector6.findRoom('P', 30, 'Embedded Systems and IoT', 'Monday', 1, 'EC201');
+  console.log(`  Found: ${lab6?.name} (facilities: ${lab6?.facilities?.join(', ')})`);
+  console.assert(lab6?.facilities?.includes('Hardware'), 'Should return Hardware lab');
+
+  // Test 7: Book room and verify exclusion
+  console.log('\nTest 7: Book room and verify exclusion');
+  const selector7 = new RoomSelector(realRooms);
+  selector7.bookRoom('C101', 'Monday', 1);
+  const room7 = selector7.findRoom('L', 35, 'Test Course', 'Monday', 1, 'TEST1');
+  console.log(`  Found: ${room7?.name} (capacity ${room7?.capacity})`);
+  console.assert(room7?.room_id !== 'C101', 'Should not return booked room');
+
+  // Test 8: Bump to next tier when classroom full
+  console.log('\nTest 8: Bump to hall when classrooms full');
+  const selector8 = new RoomSelector(realRooms);
   // Book all classrooms
-  selector2.bookRoom('R101', 'Tuesday', 1);
-  selector2.bookRoom('R102', 'Tuesday', 1);
-  const hall = selector2.findRoom('L', 60, 'Tuesday', 1);
-  console.log(`  Found: ${JSON.stringify(hall)}`);
-  console.assert(hall?.type === 'hall', 'Should fallback to hall');
+  selector8.bookRoom('C101', 'Tuesday', 1);
+  selector8.bookRoom('C102', 'Tuesday', 1);
+  selector8.bookRoom('C104', 'Tuesday', 1);
+  const room8 = selector8.findRoom('L', 35, 'Test Course', 'Tuesday', 1, 'TEST2');
+  console.log(`  Found: ${room8?.name} (capacity ${room8?.capacity})`);
+  console.assert(room8?.capacity === 120, 'Should bump to 120-cap hall');
 
-  // Test 7: No room available
-  console.log('\nTest 7: No room available');
-  const selector3 = new RoomSelector(mockRooms);
-  // Book everything
-  selector3.bookRoom('R101', 'Wednesday', 1);
-  selector3.bookRoom('R102', 'Wednesday', 1);
-  selector3.bookRoom('L201', 'Wednesday', 1);
-  selector3.bookRoom('L202', 'Wednesday', 1);
-  selector3.bookRoom('H301', 'Wednesday', 1);
-  const none = selector3.findRoom('L', 60, 'Wednesday', 1);
-  console.log(`  Found: ${none}`);
-  console.assert(none === null, 'Should return null when no rooms available');
+  // Test 9: Lab preference fallback
+  console.log('\nTest 9: Lab preference fallback');
+  const selector9 = new RoomSelector(realRooms);
+  // Book all Computers labs
+  selector9.bookRoom('L106', 'Wednesday', 1);
+  selector9.bookRoom('L107', 'Wednesday', 1);
+  const lab9 = selector9.findRoom('P', 30, 'Programming Course', 'Wednesday', 1, 'TEST3');
+  console.log(`  Found: ${lab9?.name} (facilities: ${lab9?.facilities?.join(', ')})`);
+  console.assert(lab9 !== null, 'Should return Hardware lab as fallback');
 
-  // Test 8: Practical session only uses labs
-  console.log('\nTest 8: Practical only uses labs');
-  const selector4 = new RoomSelector(mockRooms);
-  selector4.bookRoom('L201', 'Thursday', 1);
-  const lab2 = selector4.findRoom('P', 30, 'Thursday', 1);
-  console.log(`  Found: ${JSON.stringify(lab2)}`);
-  console.assert(lab2?.room_id === 'L202', 'Should return the remaining lab');
+  // Test 10: getRoomTier
+  console.log('\nTest 10: getRoomTier function');
+  console.log(`  0 students → ${selector.getRoomTier(0)} (expected: small)`);
+  console.log(`  48 students → ${selector.getRoomTier(48)} (expected: small)`);
+  console.log(`  49 students → ${selector.getRoomTier(49)} (expected: medium)`);
+  console.log(`  120 students → ${selector.getRoomTier(120)} (expected: medium)`);
+  console.log(`  121 students → ${selector.getRoomTier(121)} (expected: large)`);
+  console.assert(selector.getRoomTier(0) === 'small', '0 should be small');
+  console.assert(selector.getRoomTier(48) === 'small', '48 should be small');
+  console.assert(selector.getRoomTier(49) === 'medium', '49 should be medium');
+  console.assert(selector.getRoomTier(120) === 'medium', '120 should be medium');
+  console.assert(selector.getRoomTier(121) === 'large', '121 should be large');
 
-  // Print summary
-  console.log('\n=== Booking Summary ===');
-  console.log(JSON.stringify(selector.getBookingSummary(), null, 2));
+  // Test 11: getLabPreference
+  console.log('\nTest 11: getLabPreference function');
+  console.log(`  "Data Structures" → ${selector.getLabPreference('Data Structures')} (expected: Computers)`);
+  console.log(`  "Embedded IoT" → ${selector.getLabPreference('Embedded IoT')} (expected: Hardware)`);
+  console.log(`  "Mathematics" → ${selector.getLabPreference('Mathematics')} (expected: null)`);
+  console.assert(selector.getLabPreference('Data Structures') === 'Computers', 'Data Structures → Computers');
+  console.assert(selector.getLabPreference('Embedded IoT') === 'Hardware', 'Embedded IoT → Hardware');
+  console.assert(selector.getLabPreference('Mathematics') === null, 'Mathematics → null');
 
   console.log('\n=== All tests passed! ===');
 }

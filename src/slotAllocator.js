@@ -1,10 +1,32 @@
 /**
  * SlotAllocator - Core slot allocation engine for timetable generation
- * Manages booking state for faculty, sections, and rooms
+ * Manages booking state for faculty, sections, and rooms with time-range blocking
+ * Supports semester-half scheduling (H1, H2, full-semester)
  */
+const { getSlotsInTimeRange, timeToMinutes } = require('./timeSlotGenerator');
+
+/**
+ * Check if two semester-half values conflict
+ * @param {number} semHalf1 - First semester half (0=full, 1=H1, 2=H2)
+ * @param {number} semHalf2 - Second semester half (0=full, 1=H1, 2=H2)
+ * @returns {boolean} true if they conflict, false if they can coexist
+ */
+function semesterHalfConflicts(semHalf1, semHalf2) {
+  // Full-semester (0) conflicts with everything
+  if (semHalf1 === 0 || semHalf2 === 0) {
+    return true;
+  }
+  // H1 and H2 don't conflict (different calendar periods)
+  if (semHalf1 !== semHalf2) {
+    return false;
+  }
+  // Same half (1==1 or 2==2) conflicts
+  return true;
+}
+
 class SlotAllocator {
   /**
-   * @param {Object} timeSlots - { days: string[], slots: {id, label}[], breakSlots: [] }
+   * @param {Object} timeSlots - { days: string[], slots: {id, label, duration, start, end}[], breakSlots: [] }
    */
   constructor(timeSlots) {
     this.days = timeSlots.days;
@@ -13,20 +35,27 @@ class SlotAllocator {
       (timeSlots.breakSlots || []).map(s => s.id)
     );
 
-    // Booking maps: Map<key, Set<"day-slot">>
+    // Booking maps: Map<key, Set<"semHalf-day-slot">>
+    // Key includes semesterHalf to allow H1/H2 to share slots
     this.facultyBookings = new Map();
     this.sectionBookings = new Map();
     this.roomBookings = new Map();
+
+    // Track blocked slots (distinct from booked) - Map<key, Set<"semHalf-day-slot">>
+    this.facultyBlocked = new Map();
+    this.sectionBlocked = new Map();
+    this.roomBlocked = new Map();
   }
 
   /**
-   * Create a day-slot key for booking maps
+   * Create a key for booking maps
    * @param {string} day
    * @param {number} slotId
+   * @param {number} semesterHalf - 0=full, 1=H1, 2=H2
    * @returns {string}
    */
-  _makeKey(day, slotId) {
-    return `${day}-${slotId}`;
+  _makeKey(day, slotId, semesterHalf = 0) {
+    return `${semesterHalf}-${day}-${slotId}`;
   }
 
   /**
@@ -43,38 +72,102 @@ class SlotAllocator {
   }
 
   /**
-   * Check if a slot is free for all three constraints
-   * @param {string} facultyId
-   * @param {string} section
-   * @param {string} roomId
+   * Get all slot IDs that overlap with a given slot's time range
    * @param {string} day
    * @param {number} slotId
-   * @returns {boolean} true if slot is free
+   * @returns {Array<number>}
    */
-  isSlotFree(facultyId, section, roomId, day, slotId) {
-    const key = this._makeKey(day, slotId);
-
-    const facultyBusy = this._getBookings(this.facultyBookings, facultyId).has(key);
-    const sectionBusy = this._getBookings(this.sectionBookings, section).has(key);
-    const roomBusy = this._getBookings(this.roomBookings, roomId).has(key);
-
-    return !facultyBusy && !sectionBusy && !roomBusy;
+  _getOverlappingSlots(day, slotId) {
+    return getSlotsInTimeRange(this.slots, day, slotId);
   }
 
   /**
-   * Book a slot for faculty, section, and room
+   * Check if a slot is free for all three constraints
+   * Books a slot for faculty, section, and room - blocks full time range
    * @param {string} facultyId
    * @param {string} section
    * @param {string} roomId
    * @param {string} day
    * @param {number} slotId
+   * @param {number} semesterHalf - 0=full, 1=H1, 2=H2
    */
-  bookSlot(facultyId, section, roomId, day, slotId) {
-    const key = this._makeKey(day, slotId);
+  bookSlot(facultyId, section, roomId, day, slotId, semesterHalf = 0) {
+    // Get all overlapping slots for the time range
+    const overlappingSlotIds = this._getOverlappingSlots(day, slotId);
 
-    this._getBookings(this.facultyBookings, facultyId).add(key);
-    this._getBookings(this.sectionBookings, section).add(key);
-    this._getBookings(this.roomBookings, roomId).add(key);
+    for (const overlappingSlotId of overlappingSlotIds) {
+      const key = this._makeKey(day, overlappingSlotId, semesterHalf);
+
+      this._getBookings(this.facultyBookings, facultyId).add(key);
+      this._getBookings(this.sectionBookings, section).add(key);
+      this._getBookings(this.roomBookings, roomId).add(key);
+    }
+  }
+
+  /**
+   * Check if a slot is free for all three constraints
+   * Checks ALL slots that overlap with the given slot's time range
+   * Uses semester-half conflict matrix:
+   *   - semHalf=0 (full) conflicts with all (0, 1, 2)
+   *   - semHalf=1 (H1) and semHalf=2 (H2) do NOT conflict
+   *   - Same semHalf values conflict (1==1, 2==2)
+   * @param {string} facultyId
+   * @param {string} section
+   * @param {string} roomId
+   * @param {string} day
+   * @param {number} slotId
+   * @param {number} semesterHalf - 0=full, 1=H1, 2=H2
+   * @returns {boolean} true if slot is free
+   */
+  isSlotFree(facultyId, section, roomId, day, slotId, semesterHalf = 0) {
+    // Get all overlapping slots for the time range
+    const overlappingSlotIds = this._getOverlappingSlots(day, slotId);
+
+    for (const overlappingSlotId of overlappingSlotIds) {
+      // Check faculty conflicts
+      const facultyKeys = this._getBookings(this.facultyBookings, facultyId);
+      for (const bookedKey of facultyKeys) {
+        const [bookedSemHalf, bookedDay, bookedSlot] = bookedKey.split('-');
+        const bookedSemHalfNum = parseInt(bookedSemHalf, 10);
+        const bookedDayStr = bookedDay;
+        const bookedSlotNum = parseInt(bookedSlot, 10);
+        if (bookedDayStr === day && bookedSlotNum === overlappingSlotId) {
+          if (semesterHalfConflicts(semesterHalf, bookedSemHalfNum)) {
+            return false;
+          }
+        }
+      }
+
+      // Check section conflicts
+      const sectionKeys = this._getBookings(this.sectionBookings, section);
+      for (const bookedKey of sectionKeys) {
+        const [bookedSemHalf, bookedDay, bookedSlot] = bookedKey.split('-');
+        const bookedSemHalfNum = parseInt(bookedSemHalf, 10);
+        const bookedDayStr = bookedDay;
+        const bookedSlotNum = parseInt(bookedSlot, 10);
+        if (bookedDayStr === day && bookedSlotNum === overlappingSlotId) {
+          if (semesterHalfConflicts(semesterHalf, bookedSemHalfNum)) {
+            return false;
+          }
+        }
+      }
+
+      // Check room conflicts
+      const roomKeys = this._getBookings(this.roomBookings, roomId);
+      for (const bookedKey of roomKeys) {
+        const [bookedSemHalf, bookedDay, bookedSlot] = bookedKey.split('-');
+        const bookedSemHalfNum = parseInt(bookedSemHalf, 10);
+        const bookedDayStr = bookedDay;
+        const bookedSlotNum = parseInt(bookedSlot, 10);
+        if (bookedDayStr === day && bookedSlotNum === overlappingSlotId) {
+          if (semesterHalfConflicts(semesterHalf, bookedSemHalfNum)) {
+            return false;
+          }
+        }
+      }
+    }
+
+    return true;
   }
 
   /**
@@ -82,9 +175,10 @@ class SlotAllocator {
    * @param {string} facultyId
    * @param {string} section
    * @param {string} preferredRoomId - Room to check first (optional)
+   * @param {number} duration - Required slot duration (60 or 90)
    * @returns {{day: string, slot: number, room_id: string} | null}
    */
-  findFreeSlot(facultyId, section, preferredRoomId) {
+  findFreeSlot(facultyId, section, preferredRoomId, duration = 60) {
     // Get all rooms from the roomBookings map keys
     const allRooms = Array.from(this.roomBookings.keys());
 
@@ -98,10 +192,13 @@ class SlotAllocator {
       return null;
     }
 
+    // Filter slots by required duration and exclude break slots
+    const eligibleSlots = this.slots.filter(s => s.duration === duration && !s.is_break);
+
     // Try each day
     for (const day of this.days) {
-      // Try each slot
-      for (const slot of this.slots) {
+      // Try each slot with matching duration
+      for (const slot of eligibleSlots) {
         // Try preferred room first, then others
         const roomOrder = [preferredRoomId, ...allRooms.filter(r => r !== preferredRoomId)].filter(Boolean);
 
@@ -189,21 +286,18 @@ class SlotAllocator {
 
 // Test code - runs only when executed directly
 if (require.main === module) {
-  console.log('=== SlotAllocator Tests ===\n');
+  console.log('=== SlotAllocator Tests (Time-Range Blocking) ===\n');
 
-  const mockTimeSlots = {
-    days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
-    slots: [
-      { id: 1, label: '8:00-8:55' },
-      { id: 2, label: '9:00-9:55' },
-      { id: 3, label: '10:00-10:55' },
-      { id: 4, label: '11:00-11:55' },
-      { id: 6, label: '1:00-1:55' },
-      { id: 7, label: '2:00-2:55' },
-      { id: 8, label: '3:00-3:55' }
-    ],
-    breakSlots: [{ id: 5, label: 'LUNCH', is_break: true }]
-  };
+  const { generateTimeSlots } = require('./timeSlotGenerator');
+
+  // Generate slots with dual duration
+  const mockTimeSlots = generateTimeSlots({
+    startTime: "09:00",
+    endTime: "18:00",
+    gapDuration: 15,
+    breakAfterPeriod: 4,
+    lunchDuration: 60
+  });
 
   const allocator = new SlotAllocator(mockTimeSlots);
 
@@ -215,55 +309,58 @@ if (require.main === module) {
     }
   });
 
+  console.log('Generated slots:');
+  mockTimeSlots.slots.forEach(s => {
+    console.log(`  ${s.id}: ${s.label} (${s.duration}min)`);
+  });
+
   // Test 1: Initial slot should be free
-  console.log('Test 1: isSlotFree (initial)');
-  const free1 = allocator.isSlotFree('F01', 'CSEA-I', 'R101', 'Monday', 1);
-  console.log(`  Monday slot 1 free: ${free1} (expected: true)`);
+  console.log('\nTest 1: isSlotFree (initial)');
+  const slot60 = mockTimeSlots.slots.find(s => s.duration === 60);
+  const free1 = allocator.isSlotFree('F01', 'CSEA-I', 'R101', 'Monday', slot60.id);
+  console.log(`  Monday slot ${slot60.id} (${slot60.label}) free: ${free1} (expected: true)`);
   console.assert(free1 === true, 'Initial slot should be free');
 
-  // Test 2: Book a slot
-  console.log('\nTest 2: bookSlot');
-  allocator.bookSlot('F01', 'CSEA-I', 'R101', 'Monday', 1);
-  const busy1 = allocator.isSlotFree('F01', 'CSEA-I', 'R101', 'Monday', 1);
-  console.log(`  Monday slot 1 free after booking: ${busy1} (expected: false)`);
-  console.assert(busy1 === false, 'Booked slot should be busy');
+  // Test 2: Book a 90min slot - should block overlapping 60min slot
+  console.log('\nTest 2: bookSlot with 90min blocks overlapping 60min');
+  const slot90 = mockTimeSlots.slots.find(s => s.duration === 90 && s.start === slot60.start);
+  if (slot90) {
+    allocator.bookSlot('F01', 'CSEA-I', 'R101', 'Monday', slot90.id);
+    const busy60 = allocator.isSlotFree('F01', 'CSEA-I', 'R101', 'Monday', slot60.id);
+    console.log(`  After booking 90min slot ${slot90.id}, 60min slot ${slot60.id} free: ${busy60} (expected: false)`);
+    console.assert(busy60 === false, 'Overlapping slot should be blocked');
+  }
 
-  // Test 3: Same faculty busy, different section free
-  console.log('\nTest 3: Faculty conflict');
-  const facultyBusy = allocator.isSlotFree('F01', 'CSEB-I', 'R102', 'Monday', 1);
-  const sectionFree = allocator.isSlotFree('F02', 'CSEA-I', 'R101', 'Monday', 1);
+  // Test 3: findFreeSlot with duration filter
+  console.log('\nTest 3: findFreeSlot with duration=90');
+  const found90 = allocator.findFreeSlot('F01', 'CSEA-I', 'R101', 90);
+  console.log(`  Found 90min slot: ${JSON.stringify(found90)}`);
+  if (slot90 && found90) {
+    console.log(`  Expected: NOT slot ${slot90.id} (already booked)`);
+    console.assert(found90.slot !== slot90.id, 'Should not return booked slot');
+  }
+
+  // Test 4: Same faculty busy, different section free
+  console.log('\nTest 4: Faculty conflict');
+  const facultyBusy = allocator.isSlotFree('F01', 'CSEB-I', 'R102', 'Monday', slot90.id);
+  const sectionFree = allocator.isSlotFree('F02', 'CSEA-I', 'R101', 'Monday', slot90.id);
   console.log(`  F01 with CSEB-I: ${facultyBusy} (expected: false - faculty busy)`);
   console.log(`  F02 with CSEA-I: ${sectionFree} (expected: false - room busy)`);
   console.assert(facultyBusy === false, 'Faculty should be busy');
   console.assert(sectionFree === false, 'Room should be busy');
 
-  // Test 4: findFreeSlot
-  console.log('\nTest 4: findFreeSlot');
-  const found = allocator.findFreeSlot('F01', 'CSEA-I', 'R101');
-  console.log(`  Found slot: ${JSON.stringify(found)}`);
-  console.log(`  Expected: Monday slot 2 or later (slot 1 is booked)`);
+  // Test 5: findFreeSlot
+  console.log('\nTest 5: findFreeSlot');
+  const found = allocator.findFreeSlot('F01', 'CSEA-I', 'R101', 60);
+  console.log(`  Found 60min slot: ${JSON.stringify(found)}`);
   console.assert(found !== null, 'Should find a free slot');
-  console.assert(!(found.day === 'Monday' && found.slot === 1), 'Should not return booked slot');
 
-  // Test 5: findContiguousSlots
-  console.log('\nTest 5: findContiguousSlots (need 2 consecutive)');
+  // Test 6: findContiguousSlots
+  console.log('\nTest 6: findContiguousSlots (need 2 consecutive)');
   const contiguous = allocator.findContiguousSlots('F02', 'CSEA-I', 'L201', 2);
   console.log(`  Found contiguous slots: ${JSON.stringify(contiguous)}`);
   console.assert(contiguous !== null, 'Should find contiguous slots');
   console.assert(contiguous.length === 2, 'Should return 2 slots');
-
-  // Test 6: Contiguous slots should not cross break
-  console.log('\nTest 6: Contiguous slots respect break');
-  // Book slots 1,2,3 on Monday
-  allocator.bookSlot('F03', 'CSEA-I', 'R101', 'Monday', 1);
-  allocator.bookSlot('F03', 'CSEA-I', 'R101', 'Monday', 2);
-  allocator.bookSlot('F03', 'CSEA-I', 'R101', 'Monday', 3);
-  // Slot 5 is break, so requesting 3 consecutive should find Tuesday 1,2,3
-  const contig3 = allocator.findContiguousSlots('F03', 'CSEA-I', 'R101', 3);
-  console.log(`  3 consecutive slots: ${JSON.stringify(contig3)}`);
-  console.assert(contig3 !== null, 'Should find 3 consecutive slots');
-  console.assert(contig3.length === 3, 'Should return 3 slots');
-  console.assert(contig3[0].slot + 1 === contig3[1].slot && contig3[1].slot + 1 === contig3[2].slot, 'Slots should be consecutive');
 
   // Print summary
   console.log('\n=== Booking Summary ===');

@@ -5,6 +5,45 @@
 const SlotAllocator = require('./slotAllocator');
 const RoomSelector = require('./roomSelector');
 const { groupElectives, assignElectiveSlots } = require('./electiveSync');
+const { detectHigherSem, groupByBasket, assignBasketSlots, getCoreCourses } = require('./basketScheduler');
+
+/**
+ * Generate session list from course L/T/P values
+ * @param {Object} course - Course object with L, T, P values
+ * @returns {Array} Array of session objects { type, duration, count }
+ */
+function generateSessionList(course) {
+  const sessions = [];
+  const L = course.L;
+  const T = course.T;
+  const P = course.P;
+
+  // Lectures - dynamic duration based on L value
+  if (L === 1) {
+    sessions.push({ type: 'L', duration: 60, count: 1 });
+  } else if (L === 2) {
+    sessions.push({ type: 'L', duration: 60, count: 2 });
+  } else if (L === 3) {
+    sessions.push({ type: 'L', duration: 90, count: 2 });
+  } else if (L === 4) {
+    sessions.push({ type: 'L', duration: 90, count: 2 });
+    sessions.push({ type: 'L', duration: 60, count: 1 });
+  } else if (L >= 5) {
+    sessions.push({ type: 'L', duration: 90, count: Math.ceil(L / 1.5) });
+  }
+
+  // Tutorials - always 1hr sessions, one per week per T value
+  if (T > 0) {
+    sessions.push({ type: 'T', duration: 60, count: T });
+  }
+
+  // Practicals - always 1.5hr contiguous block, P/2 sessions per week
+  if (P > 0) {
+    sessions.push({ type: 'P', duration: 90, count: P / 2 });
+  }
+
+  return sessions;
+}
 
 /**
  * Generate a complete timetable
@@ -14,13 +53,6 @@ const { groupElectives, assignElectiveSlots } = require('./electiveSync');
  * @returns {Array} Array of timetable entries
  */
 function generateTimetable(courses, rooms, timeSlots) {
-  // Step 1: Separate elective and non-elective courses
-  const electiveCourses = courses.filter(c => c.is_elective);
-  const nonElectiveCourses = courses.filter(c => !c.is_elective);
-
-  // Step 2: Group electives and assign slots
-  const electiveGroups = groupElectives(electiveCourses);
-
   // Create SINGLE global slotAllocator and roomSelector shared across ALL sections
   // This ensures faculty conflicts and room conflicts are checked ACROSS all sections
   const slotAllocator = new SlotAllocator(timeSlots);
@@ -33,166 +65,227 @@ function generateTimetable(courses, rooms, timeSlots) {
     }
   });
 
-  // Assign elective slots (pre-assigns and books them)
-  const electiveEntries = assignElectiveSlots(electiveGroups, slotAllocator, roomSelector, timeSlots);
+  const allEntries = [];
+  const MAX_RETRY_ATTEMPTS = 300;
 
-  // Step 3: Group non-elective courses by section
+  // Group courses by section
   const coursesBySection = new Map();
-  for (const course of nonElectiveCourses) {
+  for (const course of courses) {
     if (!coursesBySection.has(course.section)) {
       coursesBySection.set(course.section, []);
     }
     coursesBySection.get(course.section).push(course);
   }
 
-  // Step 4: Process each section independently through the shared SlotAllocator
-  const allNonElectiveEntries = [];
-  const MAX_RETRY_ATTEMPTS = 300;
-
+  // Process each section
   for (const [section, sectionCourses] of coursesBySection) {
-    const sectionEntries = [];
+    // Check if this is a higher semester section
+    const isHigherSem = detectHigherSem(section, sectionCourses);
 
-    for (const course of sectionCourses) {
-      const { course_code, name, faculty_id, section: courseSection, L, T, P, section_strength, is_elective } = course;
+    if (isHigherSem) {
+      // === HIGHER SEMESTER: Use basket-based scheduling ===
 
-      // Validate faculty exists (warn if unknown)
-      const actualFacultyId = faculty_id || 'TBA';
-      if (!faculty_id) {
-        console.warn(`WARNING: Course ${course_code} has no faculty_id assigned, using "TBA"`);
-      }
+      // Separate core courses (basket=0) from elective baskets
+      const coreCourses = getCoreCourses(sectionCourses);
+      const electiveCourses = sectionCourses.filter(c => c.basket > 0);
 
-      // Schedule L lectures (1 hour each) with retry cap
-      let lAttempts = 0;
-      for (let i = 0; i < L && lAttempts < MAX_RETRY_ATTEMPTS; i++) {
-        lAttempts++;
-        // Uses shared slotAllocator - checks faculty conflicts ACROSS all sections
-        const found = slotAllocator.findFreeSlot(actualFacultyId, courseSection);
-        if (!found) {
-          console.warn(`WARNING: Could not find slot for ${course_code} L session ${i + 1}`);
-          continue;
+      // Group elective courses by basket
+      const basketMap = groupByBasket(electiveCourses);
+
+      // Assign slots to all baskets (each basket gets one shared slot)
+      const basketEntries = assignBasketSlots(basketMap, slotAllocator, roomSelector, {});
+      allEntries.push(...basketEntries);
+
+      // Schedule core courses normally
+      for (const course of coreCourses) {
+        const { course_code, course_title, faculty_ids, section: courseSection, L, T, P, students_enrolled, basket } = course;
+
+        // Use first faculty ID or 'TBA'
+        const actualFacultyId = (faculty_ids && faculty_ids.length > 0) ? faculty_ids[0] : 'TBA';
+        if (!faculty_ids || faculty_ids.length === 0) {
+          console.warn(`WARNING: Course ${course_code} has no faculty_id assigned, using "TBA"`);
         }
 
-        const room = roomSelector.findRoomByStrength('L', section_strength, found.day, found.slot, course.room_requirements || [], course_code);
-        if (!room) {
-          console.warn(`WARNING: No room for ${course_code} L session ${i + 1}`);
-          continue;
-        }
+        // Generate session list from L/T/P values
+        const sessions = generateSessionList(course);
 
-        // Books to shared slotAllocator and roomSelector - prevents cross-section conflicts
-        slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot);
-        roomSelector.bookRoom(room.room_id, found.day, found.slot);
+        // Schedule each session type
+        for (const session of sessions) {
+          const { type, duration, count } = session;
+          let attempts = 0;
 
-        sectionEntries.push({
-          course_code,
-          course_name: name,
-          faculty_id: actualFacultyId,
-          section: courseSection,
-          day: found.day,
-          slot_id: found.slot,
-          slot_label: timeSlots.slots.find(s => s.id === found.slot)?.label || '',
-          room_id: room.room_id,
-          room_name: room.name,
-          room_capacity: room.capacity,
-          type: 'L',
-          room_requirements: course.room_requirements || []
-        });
-      }
+          for (let i = 0; i < count && attempts < MAX_RETRY_ATTEMPTS; i++) {
+            attempts++;
 
-      // Schedule T tutorials (1 hour each) with retry cap
-      let tAttempts = 0;
-      for (let i = 0; i < T && tAttempts < MAX_RETRY_ATTEMPTS; i++) {
-        tAttempts++;
-        const found = slotAllocator.findFreeSlot(actualFacultyId, courseSection);
-        if (!found) {
-          console.warn(`WARNING: Could not find slot for ${course_code} T session ${i + 1}`);
-          continue;
-        }
+            if (type === 'P') {
+              const found = slotAllocator.findFreeSlot(actualFacultyId, courseSection, null, 90);
+              if (!found) {
+                console.warn(`WARNING: Could not find slot for ${course_code} ${type} session ${i + 1}`);
+                continue;
+              }
 
-        const room = roomSelector.findRoomByStrength('T', section_strength, found.day, found.slot, course.room_requirements || [], course_code);
-        if (!room) {
-          console.warn(`WARNING: No room for ${course_code} T session ${i + 1}`);
-          continue;
-        }
+              const room = roomSelector.findRoom('P', students_enrolled || 60, course_title, found.day, found.slot, course_code);
+              if (!room) {
+                console.warn(`WARNING: No room for ${course_code} ${type} session ${i + 1}`);
+                continue;
+              }
 
-        slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot);
-        roomSelector.bookRoom(room.room_id, found.day, found.slot);
+              slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot);
+              roomSelector.bookRoom(room.room_id, found.day, found.slot);
 
-        sectionEntries.push({
-          course_code,
-          course_name: name,
-          faculty_id: actualFacultyId,
-          section: courseSection,
-          day: found.day,
-          slot_id: found.slot,
-          slot_label: timeSlots.slots.find(s => s.id === found.slot)?.label || '',
-          room_id: room.room_id,
-          room_name: room.name,
-          room_capacity: room.capacity,
-          type: 'T',
-          room_requirements: course.room_requirements || []
-        });
-      }
+              const slotLabel = timeSlots.slots.find(s => s.id === found.slot)?.label || '';
+              allEntries.push({
+                course_code,
+                course_name: course_title,
+                faculty_id: actualFacultyId,
+                section: courseSection,
+                day: found.day,
+                slot_id: found.slot,
+                slot_label: slotLabel,
+                room_id: room.room_id,
+                room_name: room.name,
+                room_capacity: room.capacity,
+                type: 'P',
+                room_requirements: course.room_requirements || [],
+                duration: 90
+              });
+            } else {
+              const found = slotAllocator.findFreeSlot(actualFacultyId, courseSection, null, duration);
+              if (!found) {
+                console.warn(`WARNING: Could not find slot for ${course_code} ${type} session ${i + 1}`);
+                continue;
+              }
 
-      // Schedule P practicals (2-hour contiguous blocks) with retry cap
-      let pAttempts = 0;
-      for (let i = 0; i < P && pAttempts < MAX_RETRY_ATTEMPTS; i++) {
-        pAttempts++;
-        const contiguous = slotAllocator.findContiguousSlots(actualFacultyId, courseSection, '_LAB', 2);
-        if (!contiguous) {
-          console.warn(`WARNING: Could not find contiguous slots for ${course_code} P session ${i + 1}`);
-          continue;
-        }
+              const room = roomSelector.findRoom(type, students_enrolled || 60, course_title, found.day, found.slot, course_code);
+              if (!room) {
+                console.warn(`WARNING: No room for ${course_code} ${type} session ${i + 1}`);
+                continue;
+              }
 
-        const firstSlot = contiguous[0];
-        // For practical sessions, always pass room requirements
-        let room = roomSelector.findRoom('P', section_strength, firstSlot.day, firstSlot.slot, course.room_requirements || [], course_code);
+              slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot);
+              roomSelector.bookRoom(room.room_id, found.day, found.slot);
 
-        if (!room) {
-          console.warn(`WARNING: No lab room for ${course_code} P session ${i + 1}, using classroom`);
-          room = roomSelector.findRoom('L', section_strength, firstSlot.day, firstSlot.slot, course.room_requirements || [], course_code);
-          if (!room) {
-            console.warn(`WARNING: No room available for ${course_code} P session ${i + 1}`);
-            continue;
+              const slotLabel = timeSlots.slots.find(s => s.id === found.slot)?.label || '';
+              allEntries.push({
+                course_code,
+                course_name: course_title,
+                faculty_id: actualFacultyId,
+                section: courseSection,
+                day: found.day,
+                slot_id: found.slot,
+                slot_label: slotLabel,
+                room_id: room.room_id,
+                room_name: room.name,
+                room_capacity: room.capacity,
+                type,
+                room_requirements: course.room_requirements || [],
+                duration
+              });
+            }
           }
         }
+      }
+    } else {
+      // === REGULAR SEMESTER: Use existing logic ===
 
-        for (const cs of contiguous) {
-          slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, cs.day, cs.slot);
-          roomSelector.bookRoom(room.room_id, cs.day, cs.slot);
+      const sectionEntries = [];
+
+      for (const course of sectionCourses) {
+        const { course_code, name, faculty_id, section: courseSection, L, T, P, section_strength, is_elective } = course;
+
+        const actualFacultyId = faculty_id || 'TBA';
+        if (!faculty_id) {
+          console.warn(`WARNING: Course ${course_code} has no faculty_id assigned, using "TBA"`);
         }
 
-        const slotLabels = contiguous.map(cs =>
-          timeSlots.slots.find(s => s.id === cs.slot)?.label || ''
-        ).join(' - ');
+        const sessions = generateSessionList(course);
 
-        sectionEntries.push({
-          course_code,
-          course_name: name,
-          faculty_id: actualFacultyId,
-          section: courseSection,
-          day: firstSlot.day,
-          slot_id: contiguous.map(c => c.slot),
-          slot_label: slotLabels,
-          room_id: room.room_id,
-          room_name: room.name,
-          room_capacity: room.capacity,
-          type: 'P',
-          room_requirements: course.room_requirements || []
-        });
+        for (const session of sessions) {
+          const { type, duration, count } = session;
+          let attempts = 0;
+
+          for (let i = 0; i < count && attempts < MAX_RETRY_ATTEMPTS; i++) {
+            attempts++;
+
+            if (type === 'P') {
+              const found = slotAllocator.findFreeSlot(actualFacultyId, courseSection, null, 90);
+              if (!found) {
+                console.warn(`WARNING: Could not find slot for ${course_code} ${type} session ${i + 1}`);
+                continue;
+              }
+
+              const room = roomSelector.findRoom('P', section_strength, name, found.day, found.slot, course_code);
+              if (!room) {
+                console.warn(`WARNING: No room for ${course_code} ${type} session ${i + 1}`);
+                continue;
+              }
+
+              slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot);
+              roomSelector.bookRoom(room.room_id, found.day, found.slot);
+
+              const slotLabel = timeSlots.slots.find(s => s.id === found.slot)?.label || '';
+              sectionEntries.push({
+                course_code,
+                course_name: name,
+                faculty_id: actualFacultyId,
+                section: courseSection,
+                day: found.day,
+                slot_id: found.slot,
+                slot_label: slotLabel,
+                room_id: room.room_id,
+                room_name: room.name,
+                room_capacity: room.capacity,
+                type: 'P',
+                room_requirements: course.room_requirements || [],
+                duration: 90
+              });
+            } else {
+              const found = slotAllocator.findFreeSlot(actualFacultyId, courseSection, null, duration);
+              if (!found) {
+                console.warn(`WARNING: Could not find slot for ${course_code} ${type} session ${i + 1}`);
+                continue;
+              }
+
+              const room = roomSelector.findRoom(type, section_strength, name, found.day, found.slot, course_code);
+              if (!room) {
+                console.warn(`WARNING: No room for ${course_code} ${type} session ${i + 1}`);
+                continue;
+              }
+
+              slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot);
+              roomSelector.bookRoom(room.room_id, found.day, found.slot);
+
+              const slotLabel = timeSlots.slots.find(s => s.id === found.slot)?.label || '';
+              sectionEntries.push({
+                course_code,
+                course_name: name,
+                faculty_id: actualFacultyId,
+                section: courseSection,
+                day: found.day,
+                slot_id: found.slot,
+                slot_label: slotLabel,
+                room_id: room.room_id,
+                room_name: room.name,
+                room_capacity: room.capacity,
+                type,
+                room_requirements: course.room_requirements || [],
+                duration
+              });
+            }
+          }
+        }
       }
+
+      allEntries.push(...sectionEntries);
     }
-
-    allNonElectiveEntries.push(...sectionEntries);
   }
-
-  // Step 5: Merge elective and non-elective entries
-  const allEntries = [...electiveEntries, ...allNonElectiveEntries];
 
   return allEntries;
 }
 
 module.exports = {
-  generateTimetable
+  generateTimetable,
+  generateSessionList
 };
 
 // Test code - runs only when executed directly
@@ -200,6 +293,26 @@ if (require.main === module) {
   console.log('=== Timetable Generator Tests ===\n');
 
   const { loadRooms, loadFaculty, loadTimeSlots, loadAllCourses } = require('./dataLoader');
+
+  // Test generateSessionList
+  console.log('Test: generateSessionList function');
+  const testCases = [
+    { course: { L: 1, T: 0, P: 0 }, expected: [{ type: 'L', duration: 60, count: 1 }] },
+    { course: { L: 2, T: 1, P: 0 }, expected: [{ type: 'L', duration: 60, count: 2 }, { type: 'T', duration: 60, count: 1 }] },
+    { course: { L: 3, T: 0, P: 0 }, expected: [{ type: 'L', duration: 90, count: 2 }] },
+    { course: { L: 4, T: 0, P: 2 }, expected: [{ type: 'L', duration: 90, count: 2 }, { type: 'L', duration: 60, count: 1 }, { type: 'P', duration: 90, count: 1 }] },
+    { course: { L: 5, T: 1, P: 4 }, expected: [{ type: 'L', duration: 90, count: 4 }, { type: 'T', duration: 60, count: 1 }, { type: 'P', duration: 90, count: 2 }] }
+  ];
+
+  for (const tc of testCases) {
+    const result = generateSessionList(tc.course);
+    const match = JSON.stringify(result) === JSON.stringify(tc.expected);
+    console.log(`  L=${tc.course.L}, T=${tc.course.T}, P=${tc.course.P}: ${match ? 'PASS' : 'FAIL'}`);
+    if (!match) {
+      console.log(`    Expected: ${JSON.stringify(tc.expected)}`);
+      console.log(`    Got: ${JSON.stringify(result)}`);
+    }
+  }
 
   // Load real data
   (async () => {
@@ -209,7 +322,7 @@ if (require.main === module) {
       const timeSlots = await loadTimeSlots();
       const courses = await loadAllCourses();
 
-      console.log('Loaded data:');
+      console.log('\nLoaded data:');
       console.log(`  Rooms: ${rooms.length}`);
       console.log(`  Faculty: ${faculty.length}`);
       console.log(`  Time slots: ${timeSlots.slots.length} regular + ${timeSlots.breakSlots.length} break`);
@@ -235,7 +348,7 @@ if (require.main === module) {
       for (const [code, entries] of Object.entries(byCourse)) {
         console.log(`\n${code}:`);
         for (const e of entries) {
-          console.log(`  ${e.section} | ${e.type} | ${e.day} | ${e.slot_label} | ${e.room_name}`);
+          console.log(`  ${e.section} | ${e.type} | ${e.day} | ${e.slot_label} | ${e.room_name}${e.duration ? ` (${e.duration}min)` : ''}`);
         }
       }
 

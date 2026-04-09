@@ -1,0 +1,16 @@
+Course_Code,Course_Title,L-T-P-S-C,Faculty,Is_Combined,Semester_Half,Elective,Students,ElectiveBasket
+MA163,Linear Algebra,3-1-0-0-2,Dr. Anand Barangi,0,0,0,111,0
+CS162,Optimization,3-1-0-0-2,Dr. Dibyajyoti Guha,1,0,0,111,0
+CS163,Data Structures and Algorithms,3-0-2-0-4,Dr. Vivekraj,1,0,0,110,0
+CS208,Computer Architecture,3-0-2-0-2,Dr. Prabhu Prasad,1,0,0,110,0
+CS165,Mathematical Foundations of Computing/Discrete Mathematics,3-0-0-0-3,Dr. Suvadip Hazra,1,0,0,110,0
+ASD152,Visual Design,3-1-0-0-2,Dr. Sandesh P,0,1,1,20,1
+CS154,Introduction to Data Analytics,3-1-0-0-2,Dr. Abdul Wahid,0,1,1,11,1
+EC156,Introduction to Sensor Technology,3-1-0-0-2,Dr. Muthusankar Eswaran,0,2,1,20,1
+CS155,Introduction to Blockchain + Introduction to IoT,3-1-0-0-2,Dr. Swagatika Sahoo,0,1,1,17,1
+DS151,Linux for Engineers,3-1-0-0-2,Dr. Shrishendu Layek,1,1,1,80,1
+CS151,Introduction to Cybersecurity,3-1-0-0-2,Dr. Rajendra H,1,1,1,80,1
+DA151,Introduction to Financial Analytics,3-1-0-0-2,Prof. S R M Prasanna,1,2,1,20,1
+HS159,Principles of Quantum Physics,3-1-0-0-2,Dr. A,1,1,1,14,1
+EC155,Fundamentals of Sensing and Control-II,3-1-0-0-2,Dr. B,1,2,1,15,1
+EC123,Consumer Psychology and Decision Making,3-1-0-0-2,Dr. C,0,2,1,18,1

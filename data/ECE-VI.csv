@@ -1,0 +1,30 @@
+Course_Code,Course_Title,L-T-P-S-C,Faculty,Semester_Half,Elective,Students,ElectiveBasket
+EC307,Wireless Communication,3-0-2-0-4,Dr. Jagadeesha R Bhat,0,0,0,0
+EC456,Reinforcement Learning,3-1-0-0-4,Dr. Dibyajyoti Guha,1,1,35,1
+CS368,Computer Architecture for AI Systems,3-1-0-0-4,Dr. Nataraj,1,1,21,1
+CS369,Software Design and Architecture,3-1-0-0-4,Dr. Vivekraj,1,1,13,1
+EC363,CMOS RF Circuit Design,3-1-0-0-4,Dr. Rajesh Kumar,1,1,0,1
+CS370,Remote Sensing and Applications,3-1-0-0-4,Dr. Sunil CK,1,1,51,1
+CS371,GPU Computing,3-1-0-0-4,Dr. Pramod Yelmevad,1,1,30,1
+DA351,Explainable AI,3-1-0-0-4,Dr. Siddharth R,1,1,67,1
+CS469,Virtualisation and Cloud Computing,3-1-0-0-4,Dr. Malay,1,1,0,2
+CS372,Biometric Security and Forensics,3-1-0-0-4,Dr. Pavan,1,1,9,2
+CS472,Bioinformatics,3-1-0-0-4,Dr. Sunil P V,1,1,14,2
+CS464,Deep Learning for Computer Vision,3-1-0-0-4,Dr. Chinmayananda A,1,1,0,2
+EC366,Device-Circuit Co-Design,3-1-0-0-4,Dr. Pankaj Kumar,1,1,22,2
+CS205,Graph Theory,3-1-0-0-4,Dr. Anand B,1,1,16,3
+CS455,Blockchain Technology,3-1-0-0-4,Dr. Rajendra Hegadi,1,1,30,3
+CS458,Natural Language Processing,3-1-0-0-4,Dr. Krishnendu,1,1,120,3
+EC367,Industrial IoT,3-1-0-0-4,Dr. Prakash Pawar,1,1,55,3
+ASD351,Design Thinking and Innovation,3-1-0-0-4,Dr. Sandesh P,1,1,0,4
+DA352,Full Stack Development II,3-1-0-0-4,Dr. Manjunath,1,1,98,4
+EC361,Introduction to 5G,3-0-2-0-4,Dr. Jagadeesha R Bhat,1,1,0,4
+DS351,Statistics for Health Technology,3-1-0-0-4,Dr. Ramesh,1,1,3,5
+DS452,Advanced Optimization Techniques,3-1-0-0-4,Dr. Utkarsh,1,1,2,5
+ASD353,Quantum Hardware and Systems + Quantum Hardware Physics,3-1-0-0-4,Dr. Aswath B,1,1,14,5
+DS358,Deep Speech Processing,3-1-0-0-4,Prof. S R M Prasanna,1,1,0,5
+DA353,Cloud Computing and AI Services,3-1-0-0-4,Dr. Animesh,1,1,24,5
+CS373,DevSecOps,3-1-0-0-4,Dr. Girish Revadigar & Dr. Shirshendu Layek,1,1,50,5
+DS357,Large Language Models,3-1-0-0-4,Dr. Sunil S,1,1,31,5
+DA354,Federated Learning,3-1-0-0-4,Dr. Sruthi,1,1,11,5
+DA355,Mathematics for Modern Application,3-1-0-0-4,Prof. Arulalan Rajan,1,1,0,5

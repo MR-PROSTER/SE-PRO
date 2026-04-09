@@ -195,59 +195,127 @@ function validateTimetable(entries, courses) {
     }
   }
 
-  // 5. Check room capacity vs section strength
-  // Build a map of course-section to section_strength
-  const courseStrengthMap = new Map();
+  // 5. Check room capacity vs enrolled students
+  // Build a map of course-section to students_enrolled
+  const courseEnrolledMap = new Map();
   for (const course of courses) {
     const key = `${course.course_code}-${course.section}`;
-    courseStrengthMap.set(key, course.section_strength);
+    // Use students_enrolled if available, otherwise section_strength
+    courseEnrolledMap.set(key, course.students_enrolled || course.section_strength || 0);
   }
 
   // Check each entry for capacity issues
   for (const entry of entries) {
     const key = `${entry.course_code}-${entry.section}`;
-    const sectionStrength = courseStrengthMap.get(key);
+    const enrolledCount = courseEnrolledMap.get(key);
 
-    if (sectionStrength === undefined) {
-      continue; // Skip if we don't have strength data
+    if (enrolledCount === undefined) {
+      continue; // Skip if we don't have enrolled data
     }
 
-    // Get room capacity from the entry (we need to look it up from rooms)
-    // Since we don't have rooms here, we'll check based on room_id stored in entry
-    // The room capacity should be passed or looked up
-    // For now, we'll add the check structure - the actual capacity needs to be passed in
+    const roomCapacity = entry.room_capacity || 0;
 
-    // ERROR: room capacity < section_strength (under-capacity)
-    if (entry.room_capacity && entry.room_capacity < sectionStrength) {
+    // ERROR: enrolled > room.capacity (under-capacity)
+    if (enrolledCount > 0 && roomCapacity > 0 && enrolledCount > roomCapacity) {
       conflicts.push({
         type: 'ROOM_UNDER_CAPACITY',
-        description: `Room ${entry.room_name} (capacity ${entry.room_capacity}) is too small for ${entry.course_code} (${entry.section}) with ${sectionStrength} students`,
+        severity: 'ERROR',
+        description: `Room ${entry.room_name} (capacity ${roomCapacity}) is too small for ${entry.course_code} (${entry.section}) with ${enrolledCount} students`,
         affected: {
           room_id: entry.room_id,
           room_name: entry.room_name,
           course_code: entry.course_code,
           section: entry.section,
-          room_capacity: entry.room_capacity,
-          section_strength: sectionStrength
+          room_capacity: roomCapacity,
+          enrolled_students: enrolledCount
         }
       });
     }
 
-    // WARNING: room capacity > section_strength * 2 (room wastage)
-    if (entry.room_capacity && entry.room_capacity > sectionStrength * 2) {
+    // WARNING: hall assigned but enrolled <= 48 (should be in classroom)
+    const roomTypeLower = (entry.room_type || '').toLowerCase();
+    const isHall = roomTypeLower.includes('hall');
+    if (isHall && enrolledCount > 0 && enrolledCount <= 48) {
       conflicts.push({
-        type: 'ROOM_WASTAGE',
-        description: `Room ${entry.room_name} (capacity ${entry.room_capacity}) is too large for ${entry.course_code} (${entry.section}) with ${sectionStrength} students`,
+        type: 'ROOM_HALL_WASTAGE',
+        severity: 'WARNING',
+        description: `Room ${entry.room_name} is a hall but ${entry.course_code} (${entry.section}) has only ${enrolledCount} students - should be in classroom`,
         affected: {
           room_id: entry.room_id,
           room_name: entry.room_name,
           course_code: entry.course_code,
           section: entry.section,
-          room_capacity: entry.room_capacity,
-          section_strength: sectionStrength,
-          utilization: Math.round((sectionStrength / entry.room_capacity) * 100) + '%'
+          room_type: entry.room_type,
+          enrolled_students: enrolledCount
         }
       });
+    }
+
+    // WARNING: severe capacity wastage (room > 2x enrolled)
+    if (enrolledCount > 0 && roomCapacity > 0 && roomCapacity > enrolledCount * 2) {
+      conflicts.push({
+        type: 'ROOM_WASTAGE',
+        severity: 'WARNING',
+        description: `Room ${entry.room_name} (capacity ${roomCapacity}) is too large for ${entry.course_code} (${entry.section}) with ${enrolledCount} students`,
+        affected: {
+          room_id: entry.room_id,
+          room_name: entry.room_name,
+          course_code: entry.course_code,
+          section: entry.section,
+          room_capacity: roomCapacity,
+          enrolled_students: enrolledCount,
+          utilization: Math.round((enrolledCount / roomCapacity) * 100) + '%'
+        }
+      });
+    }
+
+    // Check facility mismatch for labs
+    if (entry.type === 'P' && entry.room_type && entry.room_type.toLowerCase().includes('lab')) {
+      const courseTitle = entry.course_name || '';
+      const roomFacilities = entry.room_facilities || [];
+
+      // Check if course title suggests Computers lab
+      const computersKeywords = ['computer', 'programming', 'software', 'data', 'algorithm', 'database', 'web', 'cloud', 'ai', 'ml'];
+      const hardwareKeywords = ['hardware', 'circuit', 'embedded', 'iot', 'sensor', 'device', 'vlsi', 'rf', 'analog', 'digital'];
+
+      const titleLower = courseTitle.toLowerCase();
+      const wantsComputers = computersKeywords.some(k => titleLower.includes(k));
+      const wantsHardware = hardwareKeywords.some(k => titleLower.includes(k));
+
+      const hasComputers = roomFacilities.some(f => f.toLowerCase().includes('computers'));
+      const hasHardware = roomFacilities.some(f => f.toLowerCase().includes('hardware'));
+
+      if (wantsComputers && hasHardware && !hasComputers) {
+        conflicts.push({
+          type: 'LAB_FACILITY_MISMATCH',
+          severity: 'WARNING',
+          description: `Hardware lab assigned to ${entry.course_code} (${courseTitle}) - should be Computers lab`,
+          affected: {
+            course_code: entry.course_code,
+            course_title: courseTitle,
+            room_id: entry.room_id,
+            room_name: entry.room_name,
+            room_facilities: roomFacilities,
+            expected_facility: 'Computers'
+          }
+        });
+      }
+
+      if (wantsHardware && hasComputers && !hasHardware) {
+        conflicts.push({
+          type: 'LAB_FACILITY_MISMATCH',
+          severity: 'WARNING',
+          description: `Computers lab assigned to ${entry.course_code} (${courseTitle}) - should be Hardware lab`,
+          affected: {
+            course_code: entry.course_code,
+            course_title: courseTitle,
+            room_id: entry.room_id,
+            room_name: entry.room_name,
+            room_facilities: roomFacilities,
+            expected_facility: 'Hardware'
+          }
+        });
+      }
     }
   }
 

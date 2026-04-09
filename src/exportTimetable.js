@@ -1,5 +1,6 @@
 /**
  * exportTimetable.js - Exports timetable to Excel using ExcelJS
+ * Supports variable row heights for 1hr and 1.5hr slots
  */
 
 const ExcelJS = require('exceljs');
@@ -24,6 +25,11 @@ const COLOR_PALETTE = [
   'FF6347', // Tomato
   '9370DB'  // Medium purple
 ];
+
+// Base row height for 1hr slots (in Excel points)
+const BASE_ROW_HEIGHT = 25;
+const ROW_HEIGHT_60MIN = BASE_ROW_HEIGHT;
+const ROW_HEIGHT_90MIN = BASE_ROW_HEIGHT * 1.5;
 
 /**
  * Generate a consistent color for a course code
@@ -58,6 +64,7 @@ async function exportTimetable(entries, timeSlots, outputPath) {
   // Get slot labels (only non-break slots)
   const slotLabels = timeSlots.slots.map(s => s.label);
   const slotIds = timeSlots.slots.map(s => s.id);
+  const slotDurations = new Map(timeSlots.slots.map(s => [s.id, s.duration]));
 
   // Days in order
   const days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
@@ -81,15 +88,11 @@ async function exportTimetable(entries, timeSlots, outputPath) {
     const sectionEntries = entries.filter(e => e.section === section);
     const uniqueCourses = new Set(sectionEntries.map(e => e.course_code));
 
-    // Count weekly hours (L+T+P per course, but we count entries)
-    // Each entry represents 1 hour (L/T) or 2 hours (P counted as 1 entry but 2 slots)
+    // Count weekly hours based on duration
     let totalHours = 0;
     for (const entry of sectionEntries) {
-      if (entry.type === 'P') {
-        totalHours += 2; // P is 2-hour block
-      } else {
-        totalHours += 1;
-      }
+      const duration = entry.duration || 60;
+      totalHours += duration / 60;
     }
 
     // Track faculty and their courses for shared faculty detection
@@ -174,7 +177,24 @@ async function exportTimetable(entries, timeSlots, outputPath) {
       sheet.getColumn(i).width = 18;
     }
 
-    // Create day rows
+    // Create day rows with variable row heights based on slot duration
+    // Each day row contains all slots, but we need to handle variable heights
+    // Approach: Each "logical row" is actually multiple Excel rows for taller slots
+    let currentExcelRow = 2;
+    const dayToExcelRow = {};
+    const slotToExcelRowOffset = {}; // Track vertical offset for each slot
+
+    // Pre-calculate row positions for each day/slot combination
+    // We use a cumulative approach: taller slots take more Excel rows
+    for (let dayIndex = 0; dayIndex < days.length; dayIndex++) {
+      const day = days[dayIndex];
+      dayToExcelRow[day] = currentExcelRow;
+
+      // All slots in a day start at the same row, but 90min slots will span more rows
+      currentExcelRow++; // Move to next row for next day
+    }
+
+    // Fill in the timetable
     for (let dayIndex = 0; dayIndex < days.length; dayIndex++) {
       const day = days[dayIndex];
       const row = sheet.getRow(dayIndex + 2);
@@ -186,12 +206,16 @@ async function exportTimetable(entries, timeSlots, outputPath) {
         bottom: { style: 'thin' },
         right: { style: 'thin' }
       };
+
+      // Set row height based on maximum slot duration for this day
+      // For simplicity, we'll set uniform row height per day based on the slots used
+      row.height = BASE_ROW_HEIGHT;
     }
 
     // Filter entries for this section
     const sectionEntries = entries.filter(e => e.section === section);
 
-    // Track which cells are filled (for lab merging)
+    // Track which cells are filled (for lab merging and 1.5hr spanning)
     const filledCells = new Set();
 
     // Fill in the timetable
@@ -200,6 +224,8 @@ async function exportTimetable(entries, timeSlots, outputPath) {
       if (dayIndex === -1) continue;
 
       const row = dayIndex + 2;
+      const duration = entry.duration || 60;
+      const is90Min = duration === 90;
 
       // Handle single slot or multiple slots (lab)
       const slots = Array.isArray(entry.slot_id) ? entry.slot_id : [entry.slot_id];
@@ -215,7 +241,10 @@ async function exportTimetable(entries, timeSlots, outputPath) {
         if (filledCells.has(cellKey)) continue;
 
         const cell = sheet.getCell(row, col);
-        cell.value = `${entry.course_code}\n${entry.faculty_id}\n${entry.room_name}`;
+
+        // Show duration in cell label
+        const durationLabel = is90Min ? ' (1.5hr)' : ' (1hr)';
+        cell.value = `${entry.course_code}${durationLabel}\n${entry.faculty_id}\n${entry.room_name}`;
 
         // Apply color for this course
         const color = getColorForCourse(entry.course_code);
@@ -224,6 +253,14 @@ async function exportTimetable(entries, timeSlots, outputPath) {
           pattern: 'solid',
           fgColor: { argb: `FF${color}` }
         };
+
+        // Set row height for 1.5hr slots
+        if (is90Min) {
+          row.height = ROW_HEIGHT_90MIN;
+        } else {
+          // Ensure row is at least the base height
+          row.height = Math.max(row.height || 0, ROW_HEIGHT_60MIN);
+        }
 
         // If this is a lab (multiple slots), merge cells
         if (slots.length > 1 && i === 0) {
@@ -286,10 +323,12 @@ async function exportTimetable(entries, timeSlots, outputPath) {
         faculty_id: entry.faculty_id,
         sessions: 0,
         room_requirements: entry.room_requirements || [],
-        color: getColorForCourse(entry.course_code)
+        color: getColorForCourse(entry.course_code),
+        totalDuration: 0
       });
     }
     courseMap.get(key).sessions += 1;
+    courseMap.get(key).totalDuration += (entry.duration || 60);
   }
 
   // Fill legend rows
@@ -299,7 +338,8 @@ async function exportTimetable(entries, timeSlots, outputPath) {
     const roomReqStr = course.room_requirements.length > 0
       ? course.room_requirements.join(', ')
       : '-';
-    row.values = [course.course_code, course.course_name, course.faculty_id, course.sessions, roomReqStr, ''];
+    const totalHours = (course.totalDuration / 60).toFixed(1);
+    row.values = [course.course_code, course.course_name, course.faculty_id, `${course.sessions} (${totalHours}hr)`, roomReqStr, ''];
 
     // Add color indicator
     const colorCell = legendSheet.getCell(rowIdx, 6);
@@ -351,6 +391,15 @@ if (require.main === module) {
       const timetable = generateTimetable(courses, rooms, timeSlots);
 
       console.log(`Generated ${timetable.length} entries`);
+
+      // Show duration breakdown
+      const durationCounts = { 60: 0, 90: 0 };
+      for (const entry of timetable) {
+        const d = entry.duration || 60;
+        durationCounts[d] = (durationCounts[d] || 0) + 1;
+      }
+      console.log(`  60min slots: ${durationCounts[60]}`);
+      console.log(`  90min slots: ${durationCounts[90]}`);
 
       const outputPath = path.join(__dirname, '..', 'outputs', 'Timetable.xlsx');
       console.log(`\nExporting to ${outputPath}...`);

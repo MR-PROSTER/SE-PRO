@@ -76,7 +76,7 @@ function assignElectiveSlots(electiveGroups, slotAllocator, roomSelector, timeSl
       const { day, slotId } = foundSlot;
 
       // Find a room for this section
-      const room = roomSelector.findRoomByStrength('L', course.section_strength, day, slotId, course.room_requirements || [], course.course_code);
+      const room = roomSelector.findRoom('L', course.section_strength, course.name, day, slotId, course.course_code);
 
       if (!room) {
         console.warn(`WARNING: No room available for ${course.course_code} (${course.section}) at ${day} slot ${slotId}`);
@@ -148,10 +148,10 @@ if (require.main === module) {
   };
 
   const mockRooms = [
-    { room_id: 'R101', name: 'Room 101', capacity: 60, type: 'classroom' },
-    { room_id: 'R102', name: 'Room 102', capacity: 60, type: 'classroom' },
-    { room_id: 'L201', name: 'Lab 201', capacity: 30, type: 'lab' },
-    { room_id: 'H301', name: 'Hall 301', capacity: 120, type: 'hall' }
+    { room_id: 'C104', name: 'Room C104', capacity: 96, type: 'classroom' },
+    { room_id: 'C202', name: 'Room C202', capacity: 96, type: 'classroom' },
+    { room_id: 'L105', name: 'Lab L105', capacity: 96, type: 'lab' },
+    { room_id: 'H301', name: 'Hall H301', capacity: 130, type: 'hall' }
   ];
 
   // Test 1: groupElectives
