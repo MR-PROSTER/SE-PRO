@@ -15,7 +15,21 @@ function validateTimetable(entries, courses) {
   // Helper to get slots as array (for practicals with 2 slots)
   const getSlots = (entry) => Array.isArray(entry.slot_id) ? entry.slot_id : [entry.slot_id];
 
-  // 1. Check faculty double-booking
+  // Helper to check if two semester-half values conflict
+  // - semHalf=0 (full) conflicts with all (0, 1, 2)
+  // - semHalf=1 (H1) and semHalf=2 (H2) do NOT conflict (different calendar periods)
+  // - Same semHalf values conflict (1==1, 2==2)
+  function semesterHalfConflicts(semHalf1, semHalf2) {
+    if (semHalf1 === 0 || semHalf2 === 0) {
+      return true; // Full semester conflicts with everything
+    }
+    if (semHalf1 !== semHalf2) {
+      return false; // H1 and H2 don't conflict
+    }
+    return true; // Same half conflicts
+  }
+
+  // 1. Check faculty double-booking with semester-half awareness
   const facultyMap = new Map();
   for (const entry of entries) {
     const key = `${entry.faculty_id}-${entry.day}`;
@@ -42,23 +56,46 @@ function validateTimetable(entries, courses) {
         // Check if it's the same course (elective sync - allowed, faculty teaches same course to multiple sections)
         const uniqueCourses = [...new Set(slotEntries.map(e => e.course_code))];
         if (uniqueCourses.length > 1) {
-          const courses = slotEntries.map(e => `${e.course_code}(${e.section})`).join(', ');
-          conflicts.push({
-            type: 'FACULTY_DOUBLE_BOOKING',
-            description: `Faculty ${slotEntries[0].faculty_id} is scheduled for multiple courses at the same time`,
-            affected: {
-              faculty_id: slotEntries[0].faculty_id,
-              day: slotEntries[0].day,
-              slot,
-              entries: slotEntries.map(e => `${e.course_code}-${e.section}`)
+          // Check semester-half conflicts
+          const semHalfValues = slotEntries.map(e => e.semester_half || 0);
+          let hasConflict = false;
+
+          // Check all pairs for semester-half conflicts
+          for (let i = 0; i < semHalfValues.length; i++) {
+            for (let j = i + 1; j < semHalfValues.length; j++) {
+              if (semesterHalfConflicts(semHalfValues[i], semHalfValues[j])) {
+                hasConflict = true;
+                break;
+              }
             }
-          });
+            if (hasConflict) break;
+          }
+
+          if (hasConflict) {
+            const semHalfLabels = slotEntries.map(e => {
+              const h = e.semester_half || 0;
+              return h === 0 ? 'Full' : h === 1 ? 'H1' : 'H2';
+            });
+            conflicts.push({
+              type: 'FACULTY_DOUBLE_BOOKING',
+              severity: 'ERROR',
+              description: `Faculty ${slotEntries[0].faculty_id} is scheduled for multiple courses at the same time with conflicting semester halves`,
+              affected: {
+                faculty_id: slotEntries[0].faculty_id,
+                day: slotEntries[0].day,
+                slot,
+                entries: slotEntries.map(e => `${e.course_code}-${e.section} (${semHalfLabels[slotEntries.indexOf(e)]})`),
+                semester_halves: semHalfValues
+              }
+            });
+          }
+          // Note: H1 + H2 sharing is VALID - do not flag
         }
       }
     }
   }
 
-  // 2. Check section double-booking
+  // 2. Check section double-booking with semester-half awareness
   const sectionMap = new Map();
   for (const entry of entries) {
     const key = `${entry.section}-${entry.day}`;
@@ -85,23 +122,45 @@ function validateTimetable(entries, courses) {
         // Check if it's the same course (elective sync - allowed)
         const uniqueCourses = [...new Set(slotEntries.map(e => e.course_code))];
         if (uniqueCourses.length > 1) {
-          const courseList = slotEntries.map(e => e.course_code).join(', ');
-          conflicts.push({
-            type: 'SECTION_DOUBLE_BOOKING',
-            description: `Section ${slotEntries[0].section} has multiple courses at the same time`,
-            affected: {
-              section: slotEntries[0].section,
-              day: slotEntries[0].day,
-              slot,
-              courses: courseList
+          // Check semester-half conflicts
+          const semHalfValues = slotEntries.map(e => e.semester_half || 0);
+          let hasConflict = false;
+
+          // Check all pairs for semester-half conflicts
+          for (let i = 0; i < semHalfValues.length; i++) {
+            for (let j = i + 1; j < semHalfValues.length; j++) {
+              if (semesterHalfConflicts(semHalfValues[i], semHalfValues[j])) {
+                hasConflict = true;
+                break;
+              }
             }
-          });
+            if (hasConflict) break;
+          }
+
+          if (hasConflict) {
+            const semHalfLabels = slotEntries.map(e => {
+              const h = e.semester_half || 0;
+              return h === 0 ? 'Full' : h === 1 ? 'H1' : 'H2';
+            });
+            conflicts.push({
+              type: 'SECTION_DOUBLE_BOOKING',
+              severity: 'ERROR',
+              description: `Section ${slotEntries[0].section} has multiple courses at the same time with conflicting semester halves`,
+              affected: {
+                section: slotEntries[0].section,
+                day: slotEntries[0].day,
+                slot,
+                courses: slotEntries.map(e => `${e.course_code} (${semHalfLabels[slotEntries.indexOf(e)]})`).join(', ')
+              }
+            });
+          }
+          // Note: H1 + H2 sharing is VALID - do not flag
         }
       }
     }
   }
 
-  // 3. Check room double-booking
+  // 3. Check room double-booking with semester-half awareness
   const roomMap = new Map();
   for (const entry of entries) {
     const key = `${entry.room_id}-${entry.day}`;
@@ -125,17 +184,41 @@ function validateTimetable(entries, courses) {
 
     for (const [slot, slotEntries] of slotMap) {
       if (slotEntries.length > 1) {
-        conflicts.push({
-          type: 'ROOM_DOUBLE_BOOKING',
-          description: `Room ${slotEntries[0].room_name} is booked for multiple courses at the same time`,
-          affected: {
-            room_id: slotEntries[0].room_id,
-            room_name: slotEntries[0].room_name,
-            day: slotEntries[0].day,
-            slot,
-            entries: slotEntries.map(e => `${e.course_code}-${e.section}`)
+        // Check semester-half conflicts
+        const semHalfValues = slotEntries.map(e => e.semester_half || 0);
+        let hasConflict = false;
+
+        // Check all pairs for semester-half conflicts
+        for (let i = 0; i < semHalfValues.length; i++) {
+          for (let j = i + 1; j < semHalfValues.length; j++) {
+            if (semesterHalfConflicts(semHalfValues[i], semHalfValues[j])) {
+              hasConflict = true;
+              break;
+            }
           }
-        });
+          if (hasConflict) break;
+        }
+
+        if (hasConflict) {
+          const semHalfLabels = slotEntries.map(e => {
+            const h = e.semester_half || 0;
+            return h === 0 ? 'Full' : h === 1 ? 'H1' : 'H2';
+          });
+          conflicts.push({
+            type: 'ROOM_DOUBLE_BOOKING',
+            severity: 'ERROR',
+            description: `Room ${slotEntries[0].room_name} is booked for multiple courses at the same time with conflicting semester halves`,
+            affected: {
+              room_id: slotEntries[0].room_id,
+              room_name: slotEntries[0].room_name,
+              day: slotEntries[0].day,
+              slot,
+              entries: slotEntries.map(e => `${e.course_code}-${e.section} (${semHalfLabels[slotEntries.indexOf(e)]})`),
+              semester_halves: semHalfValues
+            }
+          });
+        }
+        // Note: H1 + H2 sharing is VALID - do not flag
       }
     }
   }
@@ -204,13 +287,34 @@ function validateTimetable(entries, courses) {
     courseEnrolledMap.set(key, course.students_enrolled || course.section_strength || 0);
   }
 
+  // Track combined courses for logging
+  const combinedCoursesLogged = new Set();
+
   // Check each entry for capacity issues
   for (const entry of entries) {
-    const key = `${entry.course_code}-${entry.section}`;
-    const enrolledCount = courseEnrolledMap.get(key);
+    let enrolledCount;
 
-    if (enrolledCount === undefined) {
-      continue; // Skip if we don't have enrolled data
+    // For combined courses, use the combined_enrollment directly
+    if (entry.is_combined === true && entry.combined_enrollment !== undefined) {
+      enrolledCount = entry.combined_enrollment;
+
+      // Log combined courses once
+      const logKey = entry.course_code;
+      if (!combinedCoursesLogged.has(logKey)) {
+        combinedCoursesLogged.add(logKey);
+        console.log(
+          `  Combined course: ${entry.course_code} - sections [${entry.combined_sections?.join(', ')}] ` +
+          `sharing same slot, total enrollment: ${enrolledCount}`
+        );
+      }
+    } else {
+      // Regular course - look up from course map
+      const key = `${entry.course_code}-${entry.section}`;
+      enrolledCount = courseEnrolledMap.get(key);
+
+      if (enrolledCount === undefined) {
+        continue; // Skip if we don't have enrolled data
+      }
     }
 
     const roomCapacity = entry.room_capacity || 0;
@@ -422,9 +526,243 @@ function validateExamSchedule(examEntries) {
   };
 }
 
+/**
+ * Comprehensive validation that returns a structured report
+ * @param {Array} entries - Timetable entries from generateTimetable
+ * @param {Array} courses - Original courses array with L/T/P requirements
+ * @param {Array} rooms - All rooms from dataLoader
+ * @param {Object} timeSlots - Time slots config
+ * @returns {{
+ *   valid: boolean,
+ *   errors: Array,
+ *   warnings: Array,
+ *   info: Array,
+ *   stats: {
+ *     totalEntries: number,
+ *     roomUtilization: Object,
+ *     facultyLoad: Object,
+ *     sectionHours: Object,
+ *     unscheduledCourses: Array
+ *   }
+ * }}
+ */
+function validateAll(entries, courses, rooms, timeSlots) {
+  const errors = [];
+  const warnings = [];
+  const info = [];
+
+  // Run basic validation first
+  const basicResult = validateTimetable(entries, courses);
+
+  // Separate errors and warnings from basic validation
+  for (const conflict of basicResult.conflicts) {
+    if (conflict.severity === 'ERROR') {
+      errors.push({
+        type: conflict.type,
+        description: conflict.description,
+        affected: conflict.affected
+      });
+    } else {
+      warnings.push({
+        type: conflict.type,
+        description: conflict.description,
+        affected: conflict.affected
+      });
+    }
+  }
+
+  // Add missing hours as errors
+  for (const missing of basicResult.missingHours) {
+    errors.push({
+      type: 'MISSING_HOURS',
+      description: `${missing.course_code} (${missing.section}) missing ${missing.type} hours: required ${missing.required}, allocated ${missing.allocated}`,
+      affected: missing
+    });
+  }
+
+  // Calculate statistics
+  const stats = calculateTimetableStats(entries, courses, rooms, timeSlots);
+
+  // Add info messages for statistics
+  info.push(`Total scheduled entries: ${stats.totalEntries}`);
+  info.push(`Total unique courses scheduled: ${stats.uniqueCourses}`);
+  info.push(`Room utilization: ${stats.averageRoomUtilization}%`);
+  info.push(`Faculty with highest load: ${stats.highestFacultyLoad.faculty_id} (${stats.highestFacultyLoad.hours} hours)`);
+
+  // Check for unscheduled courses
+  const scheduledCourses = new Set(entries.map(e => `${e.course_code}-${e.section}`));
+  const allCourses = new Set(courses.map(c => `${c.course_code}-${c.section}`));
+  const unscheduledCourses = [];
+
+  for (const courseKey of allCourses) {
+    if (!scheduledCourses.has(courseKey)) {
+      const [courseCode, section] = courseKey.split('-');
+      unscheduledCourses.push({ course_code: courseCode, section });
+    }
+  }
+
+  if (unscheduledCourses.length > 0) {
+    warnings.push({
+      type: 'UNSCHEDULED_COURSES',
+      description: `${unscheduledCourses.length} courses were not scheduled`,
+      affected: { courses: unscheduledCourses }
+    });
+  }
+
+  // Check for room under-utilization
+  const roomUsage = new Map();
+  for (const entry of entries) {
+    const key = entry.room_id;
+    if (!roomUsage.has(key)) {
+      roomUsage.set(key, { name: entry.room_name, capacity: entry.room_capacity, usage: 0 });
+    }
+    roomUsage.get(key).usage++;
+  }
+
+  for (const [roomId, data] of roomUsage) {
+    const utilization = Math.round((data.usage / (5 * timeSlots.slots.length)) * 100);
+    if (utilization < 10) {
+      info.push(`Room ${data.name} is under-utilized (${utilization}% of available slots)`);
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+    info,
+    stats
+  };
+}
+
+/**
+ * Calculate comprehensive timetable statistics
+ * @param {Array} entries - Timetable entries
+ * @param {Array} courses - Courses array
+ * @param {Array} rooms - Rooms array
+ * @param {Object} timeSlots - Time slots config
+ * @returns {Object} Statistics object
+ */
+function calculateTimetableStats(entries, courses, rooms, timeSlots) {
+  const stats = {
+    totalEntries: entries.length,
+    uniqueCourses: new Set(entries.map(e => e.course_code)).size,
+
+    // Room utilization
+    roomUtilization: {},
+    averageRoomUtilization: 0,
+
+    // Faculty load
+    facultyLoad: {},
+    highestFacultyLoad: { faculty_id: '', hours: 0 },
+
+    // Section hours
+    sectionHours: {},
+
+    // Course distribution by type
+    courseTypeDistribution: { L: 0, T: 0, P: 0 },
+
+    // Semester half distribution
+    semesterHalfDistribution: { full: 0, h1: 0, h2: 0 }
+  };
+
+  // Calculate room utilization
+  const roomUsage = new Map();
+  const totalAvailableSlots = 5 * timeSlots.slots.length; // 5 days * number of slots
+
+  for (const entry of entries) {
+    // Room utilization
+    if (!roomUsage.has(entry.room_id)) {
+      roomUsage.set(entry.room_id, {
+        room_id: entry.room_id,
+        room_name: entry.room_name,
+        capacity: entry.room_capacity,
+        slotsUsed: 0,
+        totalEnrollment: 0
+      });
+    }
+    roomUsage.get(entry.room_id).slotsUsed++;
+    roomUsage.get(entry.room_id).totalEnrollment += entry.is_combined
+      ? (entry.combined_enrollment || 0)
+      : (entry.students_enrolled || 0);
+
+    // Faculty load
+    if (!stats.facultyLoad[entry.faculty_id]) {
+      stats.facultyLoad[entry.faculty_id] = {
+        faculty_id: entry.faculty_id,
+        hours: 0,
+        courses: new Set()
+      };
+    }
+    const duration = entry.duration || 60;
+    stats.facultyLoad[entry.faculty_id].hours += duration / 60;
+    stats.facultyLoad[entry.faculty_id].courses.add(entry.course_code);
+
+    // Section hours
+    const sectionKey = `${entry.section}-${entry.semester_half || 0}`;
+    if (!stats.sectionHours[sectionKey]) {
+      stats.sectionHours[sectionKey] = {
+        section: entry.section,
+        semester_half: entry.semester_half || 0,
+        L: 0,
+        T: 0,
+        P: 0
+      };
+    }
+    if (entry.type === 'L') {
+      stats.sectionHours[sectionKey].L += duration / 60;
+    } else if (entry.type === 'T') {
+      stats.sectionHours[sectionKey].T += duration / 60;
+    } else if (entry.type === 'P') {
+      stats.sectionHours[sectionKey].P += 1.5; // Practical is 1.5hr block
+    }
+
+    // Course type distribution
+    stats.courseTypeDistribution[entry.type]++;
+
+    // Semester half distribution
+    if (entry.semester_half === 0) {
+      stats.semesterHalfDistribution.full++;
+    } else if (entry.semester_half === 1) {
+      stats.semesterHalfDistribution.h1++;
+    } else if (entry.semester_half === 2) {
+      stats.semesterHalfDistribution.h2++;
+    }
+  }
+
+  // Convert room usage to utilization percentages
+  let totalUtilization = 0;
+  let roomCount = 0;
+  for (const [roomId, data] of roomUsage) {
+    const utilization = Math.round((data.slotsUsed / totalAvailableSlots) * 100);
+    stats.roomUtilization[roomId] = {
+      room_name: data.room_name,
+      capacity: data.capacity,
+      slots_used: data.slotsUsed,
+      utilization_percentage: utilization,
+      average_enrollment: Math.round(data.totalEnrollment / data.slotsUsed)
+    };
+    totalUtilization += utilization;
+    roomCount++;
+  }
+  stats.averageRoomUtilization = roomCount > 0 ? Math.round(totalUtilization / roomCount) : 0;
+
+  // Find highest faculty load
+  for (const [facultyId, load] of Object.entries(stats.facultyLoad)) {
+    load.courses = Array.from(load.courses); // Convert Set to Array for serialization
+    if (load.hours > stats.highestFacultyLoad.hours) {
+      stats.highestFacultyLoad = { faculty_id: facultyId, hours: load.hours };
+    }
+  }
+
+  return stats;
+}
+
 module.exports = {
   validateTimetable,
-  validateExamSchedule
+  validateExamSchedule,
+  validateAll,
+  calculateTimetableStats
 };
 
 // Test code - runs only when executed directly

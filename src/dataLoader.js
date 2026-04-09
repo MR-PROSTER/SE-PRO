@@ -192,28 +192,41 @@ async function loadAllCourses() {
 
 /**
  * Parse students.csv
- * Returns Map<Group, { count, courseSet: Set<course_codes> }>
+ * Returns { groupMap, courseMap }
+ * - groupMap: Map<Group, { count, courseSet: Set<course_codes> }>
+ * - courseMap: Map<course_code, Set<Student_ID>> for precise enrollment tracking
  * Group = section name like "CSEA-1", "ECE-V"
  * Courses = semicolon-separated list of course codes
  */
 async function loadStudents() {
   return new Promise((resolve, reject) => {
     const groupMap = new Map();
+    const courseMap = new Map();
 
     fs.createReadStream(path.join(DATA_DIR, 'students.csv'))
       .pipe(csv())
       .on('data', (row) => {
+        const studentId = row.Student_ID;
         const group = row.Group;
         const courses = row.Courses ? row.Courses.split(';').map(c => c.trim()) : [];
 
+        // Update group map
         if (!groupMap.has(group)) {
           groupMap.set(group, { count: 0, courseSet: new Set() });
         }
         const groupData = groupMap.get(group);
         groupData.count++;
         courses.forEach(c => groupData.courseSet.add(c));
+
+        // Update course map - track which students are enrolled in each course
+        for (const course of courses) {
+          if (!courseMap.has(course)) {
+            courseMap.set(course, new Set());
+          }
+          courseMap.get(course).add(studentId);
+        }
       })
-      .on('end', () => resolve(groupMap))
+      .on('end', () => resolve({ groupMap, courseMap }))
       .on('error', reject);
   });
 }

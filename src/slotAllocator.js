@@ -362,6 +362,70 @@ if (require.main === module) {
   console.assert(contiguous !== null, 'Should find contiguous slots');
   console.assert(contiguous.length === 2, 'Should return 2 slots');
 
+  // Test 7: Semester-half conflict detection
+  console.log('\nTest 7: Semester-half conflict detection');
+  const allocator2 = new SlotAllocator(mockTimeSlots);
+  rooms.forEach(r => {
+    if (!allocator2.roomBookings.has(r)) {
+      allocator2.roomBookings.set(r, new Set());
+    }
+  });
+
+  // Book H1 course (semHalf=1) for F01, CSEA-I, R101
+  allocator2.bookSlot('F01', 'CSEA-I', 'R101', 'Monday', slot60.id, 1);
+  console.log('  Booked F01, CSEA-I, R101, Monday, slot1 with semHalf=1 (H1)');
+
+  // Test: Same faculty, same section, same room - H2 should be free (different calendar period)
+  const h2SameAll = allocator2.isSlotFree('F01', 'CSEA-I', 'R101', 'Monday', slot60.id, 2);
+  console.log(`  H2 same faculty/section/room: ${h2SameAll} (expected: true - H1/H2 different periods)`);
+  console.assert(h2SameAll === true, 'H1 and H2 should not conflict');
+
+  // Test: Same faculty - full-sem SHOULD conflict with H1
+  const fullSameFaculty = allocator2.isSlotFree('F01', 'CSEB-I', 'R102', 'Monday', slot60.id, 0);
+  console.log(`  Full-sem same faculty (F01): ${fullSameFaculty} (expected: false - full-sem conflicts with H1)`);
+  console.assert(fullSameFaculty === false, 'Full semester should conflict with H1 for same faculty');
+
+  // Test: Same section - full-sem SHOULD conflict with H1
+  const fullSameSection = allocator2.isSlotFree('F02', 'CSEA-I', 'R102', 'Monday', slot60.id, 0);
+  console.log(`  Full-sem same section (CSEA-I): ${fullSameSection} (expected: false - full-sem conflicts)`);
+  console.assert(fullSameSection === false, 'Full semester should conflict with H1 for same section');
+
+  // Test: Same room - full-sem SHOULD conflict with H1
+  const fullSameRoom = allocator2.isSlotFree('F02', 'CSEB-I', 'R101', 'Monday', slot60.id, 0);
+  console.log(`  Full-sem same room (R101): ${fullSameRoom} (expected: false - full-sem conflicts)`);
+  console.assert(fullSameRoom === false, 'Full semester should conflict with H1 for same room');
+
+  // Test: Same H1 should conflict (same section)
+  const h1SameSection = allocator2.isSlotFree('F02', 'CSEA-I', 'R102', 'Monday', slot60.id, 1);
+  console.log(`  H1 same section (CSEA-I): ${h1SameSection} (expected: false - same half conflicts)`);
+  console.assert(h1SameSection === false, 'Same semester half should conflict for same section');
+
+  // Test 8: H1 and H2 can both book same slot (different faculty/section/room)
+  console.log('\nTest 8: H1 and H2 can share same slot (different constraints)');
+  const allocator3 = new SlotAllocator(mockTimeSlots);
+  rooms.forEach(r => {
+    if (!allocator3.roomBookings.has(r)) {
+      allocator3.roomBookings.set(r, new Set());
+    }
+  });
+
+  // Book H1 for F01/CSEA-I/R101
+  allocator3.bookSlot('F01', 'CSEA-I', 'R101', 'Monday', slot60.id, 1);
+  // Book H2 for F02/CSEB-I/R102 - should succeed (no overlapping constraints)
+  const h2DifferentAll = allocator3.isSlotFree('F02', 'CSEB-I', 'R102', 'Monday', slot60.id, 2);
+  console.log(`  H2 with different faculty/section/room: ${h2DifferentAll} (expected: true)`);
+  console.assert(h2DifferentAll === true, 'H2 with all different should be free');
+
+  // Verify H1 can't re-book same room
+  const h1Rebook = allocator3.isSlotFree('F01', 'CSEA-I', 'R101', 'Monday', slot60.id, 1);
+  console.log(`  H1 re-book at R101: ${h1Rebook} (expected: false)`);
+  console.assert(h1Rebook === false, 'H1 should conflict with existing H1 in same room');
+
+  // Verify H2 can book same room (different calendar period)
+  const h2SameRoom = allocator3.isSlotFree('F01', 'CSEA-I', 'R101', 'Monday', slot60.id, 2);
+  console.log(`  H2 book at R101 (same room, diff half): ${h2SameRoom} (expected: true - different halves)`);
+  console.assert(h2SameRoom === true, 'H2 should be able to book same room as H1');
+
   // Print summary
   console.log('\n=== Booking Summary ===');
   console.log(JSON.stringify(allocator.getBookingSummary(), null, 2));

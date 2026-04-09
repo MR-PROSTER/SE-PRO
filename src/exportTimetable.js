@@ -26,6 +26,10 @@ const COLOR_PALETTE = [
   '9370DB'  // Medium purple
 ];
 
+// Semester half colors
+const H1_COLOR = 'BAE1FF'; // Light blue for First Half
+const H2_COLOR = 'FFDAB9'; // Light orange/peach for Second Half
+
 // Base row height for 1hr slots (in Excel points)
 const BASE_ROW_HEIGHT = 25;
 const ROW_HEIGHT_60MIN = BASE_ROW_HEIGHT;
@@ -244,14 +248,34 @@ async function exportTimetable(entries, timeSlots, outputPath) {
 
         // Show duration in cell label
         const durationLabel = is90Min ? ' (1.5hr)' : ' (1hr)';
-        cell.value = `${entry.course_code}${durationLabel}\n${entry.faculty_id}\n${entry.room_name}`;
 
-        // Apply color for this course
-        const color = getColorForCourse(entry.course_code);
+        // Add semester half indicator
+        const semHalf = entry.semester_half || 0;
+        const semHalfLabel = semHalf === 1 ? ' (H1)' : semHalf === 2 ? ' (H2)' : '';
+
+        // Add combined course indicator
+        const isCombined = entry.is_combined === true;
+        const combinedLabel = isCombined ? ' (Combined)' : '';
+
+        cell.value = `${entry.course_code}${durationLabel}${semHalfLabel}${combinedLabel}\n${entry.faculty_id}\n${entry.room_name}`;
+
+        // Apply color for this course, with semester half overlay
+        const baseColor = getColorForCourse(entry.course_code);
+
+        // For H1/H2 courses, blend with semester half color
+        let fillColor = baseColor;
+        if (semHalf === 1) {
+          // H1: Use light blue tint
+          fillColor = H1_COLOR;
+        } else if (semHalf === 2) {
+          // H2: Use light orange tint
+          fillColor = H2_COLOR;
+        }
+
         cell.fill = {
           type: 'pattern',
           pattern: 'solid',
-          fgColor: { argb: `FF${color}` }
+          fgColor: { argb: `FF${fillColor}` }
         };
 
         // Set row height for 1.5hr slots
@@ -277,17 +301,50 @@ async function exportTimetable(entries, timeSlots, outputPath) {
     }
 
     // Apply borders to all cells
+    // Track which cells have combined courses for thick border
+    const combinedCells = new Set();
+    for (const entry of sectionEntries) {
+      if (entry.is_combined === true) {
+        const dayIndex = days.indexOf(entry.day);
+        if (dayIndex !== -1) {
+          const row = dayIndex + 2;
+          const slots = Array.isArray(entry.slot_id) ? entry.slot_id : [entry.slot_id];
+          for (const slotId of slots) {
+            const slotIndex = slotIds.indexOf(slotId);
+            if (slotIndex !== -1) {
+              const col = slotIndex + 2;
+              combinedCells.add(`${row}-${col}`);
+            }
+          }
+        }
+      }
+    }
+
     for (let row = 1; row <= days.length + 1; row++) {
       for (let col = 1; col <= slotLabels.length + 1; col++) {
         const cell = sheet.getCell(row, col);
+        const cellKey = `${row}-${col}`;
+        const isCombined = combinedCells.has(cellKey);
+
         cell.border = {
-          top: { style: 'thin' },
-          left: { style: 'thin' },
-          bottom: { style: 'thin' },
-          right: { style: 'thin' }
+          top: { style: isCombined ? 'thick' : 'thin' },
+          left: { style: isCombined ? 'thick' : 'thin' },
+          bottom: { style: isCombined ? 'thick' : 'thin' },
+          right: { style: isCombined ? 'thick' : 'thin' }
         };
       }
     }
+
+    // Add note at bottom of sheet explaining H1/H2
+    const noteRow = days.length + 3;
+    const noteCell = sheet.getCell(noteRow, 1);
+    noteCell.value = 'H1 = First Half (weeks 1-8), H2 = Second Half (weeks 9-16)';
+    noteCell.font = { italic: true, size: 10 };
+    noteCell.fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFF5F5F5' }
+    };
 
     // Freeze first row and first column
     sheet.views = [

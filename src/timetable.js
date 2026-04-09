@@ -6,6 +6,8 @@ const SlotAllocator = require('./slotAllocator');
 const RoomSelector = require('./roomSelector');
 const { groupElectives, assignElectiveSlots } = require('./electiveSync');
 const { detectHigherSem, groupByBasket, assignBasketSlots, getCoreCourses } = require('./basketScheduler');
+const { resolveCombinedCourses, isCombinedCourse } = require('./combinedCourseResolver');
+const { resolveEnrollments } = require('./enrollmentResolver');
 
 /**
  * Generate session list from course L/T/P values
@@ -68,16 +70,139 @@ function generateTimetable(courses, rooms, timeSlots) {
   const allEntries = [];
   const MAX_RETRY_ATTEMPTS = 300;
 
-  // Group courses by section
+  // STEP 1: Resolve combined courses (Is_Combined=1 across multiple sections)
+  const { combinedCourses, individualCourses } = resolveCombinedCourses(courses);
+
+  // STEP 2: Schedule combined courses FIRST (before individual courses)
+  console.log('\n=== Scheduling Combined Courses ===');
+  for (const course of combinedCourses) {
+    const {
+      course_code,
+      course_title,
+      faculty_ids,
+      sections,
+      combined_enrollment,
+      semester_half,
+      L, T, P
+    } = course;
+
+    // Use first faculty ID or 'TBA'
+    const actualFacultyId = (faculty_ids && faculty_ids.length > 0) ? faculty_ids[0] : 'TBA';
+    if (!faculty_ids || faculty_ids.length === 0) {
+      console.warn(`WARNING: Combined course ${course_code} has no faculty_id assigned, using "TBA"`);
+    }
+
+    const semHalf = semester_half || 0;
+
+    // Generate session list from L/T/P values
+    const sessions = generateSessionList(course);
+
+    // Schedule each session type
+    for (const session of sessions) {
+      const { type, duration, count } = session;
+      let attempts = 0;
+
+      for (let i = 0; i < count && attempts < MAX_RETRY_ATTEMPTS; i++) {
+        attempts++;
+
+        // Find a slot that works for ALL sections simultaneously
+        let foundSlot = null;
+        const days = slotAllocator.days;
+        const slots = slotAllocator.slots.filter(s => s.duration === duration && !s.is_break);
+
+        outerLoop:
+        for (const day of days) {
+          for (const slot of slots) {
+            // Check if this slot works for faculty and ALL sections
+            let allFree = true;
+
+            // Check faculty
+            if (!slotAllocator.isSlotFree(actualFacultyId, sections[0], '_DUMMY', day, slot.id, semHalf)) {
+              allFree = false;
+            }
+
+            // Check all sections
+            if (allFree) {
+              for (const section of sections) {
+                if (!slotAllocator.isSlotFree(actualFacultyId, section, '_DUMMY', day, slot.id, semHalf)) {
+                  allFree = false;
+                  break;
+                }
+              }
+            }
+
+            if (allFree) {
+              foundSlot = { day, slot: slot.id };
+              break outerLoop;
+            }
+          }
+        }
+
+        if (!foundSlot) {
+          console.warn(`WARNING: Could not find common slot for combined course ${course_code} ${type} session ${i + 1}`);
+          continue;
+        }
+
+        // Find room based on COMBINED enrollment (not single section strength)
+        const room = roomSelector.findRoom(type, combined_enrollment, course_title, foundSlot.day, foundSlot.slot, course_code);
+        if (!room) {
+          console.warn(`WARNING: No room large enough for combined course ${course_code} (${combined_enrollment} students)`);
+          continue;
+        }
+
+        // Book slot for ALL sections simultaneously
+        slotAllocator.bookSlot(actualFacultyId, sections[0], room.room_id, foundSlot.day, foundSlot.slot, semHalf);
+        for (const section of sections) {
+          // Block this slot for each section
+          if (section !== sections[0]) {
+            slotAllocator.bookSlot(actualFacultyId, section, '_BLOCKED', foundSlot.day, foundSlot.slot, semHalf);
+          }
+        }
+        roomSelector.bookRoom(room.room_id, foundSlot.day, foundSlot.slot);
+
+        const slotLabel = timeSlots.slots.find(s => s.id === foundSlot.slot)?.label || '';
+
+        // Create entry for EACH section in the combined course
+        for (const section of sections) {
+          allEntries.push({
+            course_code,
+            course_name: course_title,
+            faculty_id: actualFacultyId,
+            section,
+            day: foundSlot.day,
+            slot_id: foundSlot.slot,
+            slot_label: slotLabel,
+            room_id: room.room_id,
+            room_name: room.name,
+            room_capacity: room.capacity,
+            type,
+            room_requirements: course.room_requirements || [],
+            duration,
+            semester_half: semHalf,
+            is_combined: true,
+            combined_sections: sections,
+            combined_enrollment
+          });
+        }
+
+        console.log(
+          `  Scheduled ${course_code} (${type}, ${duration}min) for [${sections.join(', ')}] ` +
+          `on ${foundSlot.day} ${slotLabel} in ${room.name} (capacity ${room.capacity}, enrollment ${combined_enrollment})`
+        );
+      }
+    }
+  }
+
+  // STEP 3: Group remaining individual courses by section
   const coursesBySection = new Map();
-  for (const course of courses) {
+  for (const course of individualCourses) {
     if (!coursesBySection.has(course.section)) {
       coursesBySection.set(course.section, []);
     }
     coursesBySection.get(course.section).push(course);
   }
 
-  // Process each section
+  // Process each section for individual courses
   for (const [section, sectionCourses] of coursesBySection) {
     // Check if this is a higher semester section
     const isHigherSem = detectHigherSem(section, sectionCourses);
@@ -97,14 +222,18 @@ function generateTimetable(courses, rooms, timeSlots) {
       allEntries.push(...basketEntries);
 
       // Schedule core courses normally
-      for (const course of coreCourses) {
-        const { course_code, course_title, faculty_ids, section: courseSection, L, T, P, students_enrolled, basket } = course;
+      // Sort by semester_half: full-semester (0) first, then H1 (1), then H2 (2)
+      const sortedCoreCourses = [...coreCourses].sort((a, b) => (a.semester_half || 0) - (b.semester_half || 0));
+      for (const course of sortedCoreCourses) {
+        const { course_code, course_title, faculty_ids, section: courseSection, L, T, P, students_enrolled, basket, semester_half } = course;
 
         // Use first faculty ID or 'TBA'
         const actualFacultyId = (faculty_ids && faculty_ids.length > 0) ? faculty_ids[0] : 'TBA';
         if (!faculty_ids || faculty_ids.length === 0) {
           console.warn(`WARNING: Course ${course_code} has no faculty_id assigned, using "TBA"`);
         }
+
+        const semHalf = semester_half || 0;
 
         // Generate session list from L/T/P values
         const sessions = generateSessionList(course);
@@ -130,7 +259,7 @@ function generateTimetable(courses, rooms, timeSlots) {
                 continue;
               }
 
-              slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot);
+              slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot, semHalf);
               roomSelector.bookRoom(room.room_id, found.day, found.slot);
 
               const slotLabel = timeSlots.slots.find(s => s.id === found.slot)?.label || '';
@@ -147,7 +276,8 @@ function generateTimetable(courses, rooms, timeSlots) {
                 room_capacity: room.capacity,
                 type: 'P',
                 room_requirements: course.room_requirements || [],
-                duration: 90
+                duration: 90,
+                semester_half: semHalf
               });
             } else {
               const found = slotAllocator.findFreeSlot(actualFacultyId, courseSection, null, duration);
@@ -162,7 +292,7 @@ function generateTimetable(courses, rooms, timeSlots) {
                 continue;
               }
 
-              slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot);
+              slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot, semHalf);
               roomSelector.bookRoom(room.room_id, found.day, found.slot);
 
               const slotLabel = timeSlots.slots.find(s => s.id === found.slot)?.label || '';
@@ -179,7 +309,8 @@ function generateTimetable(courses, rooms, timeSlots) {
                 room_capacity: room.capacity,
                 type,
                 room_requirements: course.room_requirements || [],
-                duration
+                duration,
+                semester_half: semHalf
               });
             }
           }
@@ -190,13 +321,36 @@ function generateTimetable(courses, rooms, timeSlots) {
 
       const sectionEntries = [];
 
-      for (const course of sectionCourses) {
-        const { course_code, name, faculty_id, section: courseSection, L, T, P, section_strength, is_elective } = course;
+      // Sort courses by semester_half: full-semester (0) first, then H1 (1), then H2 (2)
+      const sortedSectionCourses = [...sectionCourses].sort((a, b) => (a.semester_half || 0) - (b.semester_half || 0));
 
-        const actualFacultyId = faculty_id || 'TBA';
-        if (!faculty_id) {
+      for (const course of sortedSectionCourses) {
+        // Use course_title and faculty_ids (from dataLoader), fallback to name/faculty_id for legacy
+        const {
+          course_code,
+          course_title,
+          name,
+          faculty_ids,
+          faculty_id,
+          section: courseSection,
+          L, T, P,
+          students_enrolled,
+          section_strength,
+          is_elective,
+          semester_half
+        } = course;
+
+        // Prefer course_title over name, faculty_ids over faculty_id
+        const courseName = course_title || name;
+        const actualFacultyId = (faculty_ids && faculty_ids.length > 0) ? faculty_ids[0] : (faculty_id || 'TBA');
+        if (!faculty_ids && !faculty_id) {
           console.warn(`WARNING: Course ${course_code} has no faculty_id assigned, using "TBA"`);
         }
+
+        // Prefer students_enrolled over section_strength
+        const enrollment = students_enrolled || section_strength || 60;
+
+        const semHalf = semester_half || 0;
 
         const sessions = generateSessionList(course);
 
@@ -214,19 +368,19 @@ function generateTimetable(courses, rooms, timeSlots) {
                 continue;
               }
 
-              const room = roomSelector.findRoom('P', section_strength, name, found.day, found.slot, course_code);
+              const room = roomSelector.findRoom('P', enrollment, courseName, found.day, found.slot, course_code);
               if (!room) {
                 console.warn(`WARNING: No room for ${course_code} ${type} session ${i + 1}`);
                 continue;
               }
 
-              slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot);
+              slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot, semHalf);
               roomSelector.bookRoom(room.room_id, found.day, found.slot);
 
               const slotLabel = timeSlots.slots.find(s => s.id === found.slot)?.label || '';
               sectionEntries.push({
                 course_code,
-                course_name: name,
+                course_name: courseName,
                 faculty_id: actualFacultyId,
                 section: courseSection,
                 day: found.day,
@@ -237,7 +391,8 @@ function generateTimetable(courses, rooms, timeSlots) {
                 room_capacity: room.capacity,
                 type: 'P',
                 room_requirements: course.room_requirements || [],
-                duration: 90
+                duration: 90,
+                semester_half: semHalf
               });
             } else {
               const found = slotAllocator.findFreeSlot(actualFacultyId, courseSection, null, duration);
@@ -246,19 +401,19 @@ function generateTimetable(courses, rooms, timeSlots) {
                 continue;
               }
 
-              const room = roomSelector.findRoom(type, section_strength, name, found.day, found.slot, course_code);
+              const room = roomSelector.findRoom(type, enrollment, courseName, found.day, found.slot, course_code);
               if (!room) {
                 console.warn(`WARNING: No room for ${course_code} ${type} session ${i + 1}`);
                 continue;
               }
 
-              slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot);
+              slotAllocator.bookSlot(actualFacultyId, courseSection, room.room_id, found.day, found.slot, semHalf);
               roomSelector.bookRoom(room.room_id, found.day, found.slot);
 
               const slotLabel = timeSlots.slots.find(s => s.id === found.slot)?.label || '';
               sectionEntries.push({
                 course_code,
-                course_name: name,
+                course_name: courseName,
                 faculty_id: actualFacultyId,
                 section: courseSection,
                 day: found.day,
@@ -269,7 +424,8 @@ function generateTimetable(courses, rooms, timeSlots) {
                 room_capacity: room.capacity,
                 type,
                 room_requirements: course.room_requirements || [],
-                duration
+                duration,
+                semester_half: semHalf
               });
             }
           }

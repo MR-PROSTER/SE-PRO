@@ -138,9 +138,45 @@
     <!-- Section 4: Validation Report -->
     <section id="validation-section" class="section">
       <h2>Validation Report</h2>
-      <button id="validate-btn" class="btn btn-secondary">Run Conflict Check</button>
+      <div class="validation-actions">
+        <button id="validate-btn" class="btn btn-secondary">Run Conflict Check</button>
+        <button id="download-report-btn" class="btn btn-primary" disabled>Download Full Report</button>
+      </div>
+
+      <!-- Validation Dashboard with Tabs -->
+      <div id="validation-dashboard" style="display: none;">
+        <div class="tabs">
+          <button class="tab-btn active" data-tab="errors-tab">Errors (<span id="errors-count">0</span>)</button>
+          <button class="tab-btn" data-tab="warnings-tab">Warnings (<span id="warnings-count">0</span>)</button>
+          <button class="tab-btn" data-tab="stats-tab">Statistics</button>
+          <button class="tab-btn" data-tab="baskets-tab">Elective Baskets</button>
+        </div>
+
+        <div class="tab-content">
+          <!-- Errors Tab -->
+          <div id="errors-tab" class="tab-pane active">
+            <div id="errors-container"></div>
+          </div>
+
+          <!-- Warnings Tab -->
+          <div id="warnings-tab" class="tab-pane">
+            <div id="warnings-container"></div>
+          </div>
+
+          <!-- Statistics Tab -->
+          <div id="stats-tab" class="tab-pane">
+            <div id="stats-container"></div>
+          </div>
+
+          <!-- Elective Baskets Tab -->
+          <div id="baskets-tab" class="tab-pane">
+            <div id="baskets-container"></div>
+          </div>
+        </div>
+      </div>
+
       <div id="validation-container">
-        <!-- Validation results will be displayed here -->
+        <!-- Legacy validation results will be displayed here -->
       </div>
     </section>
   </main>

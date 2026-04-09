@@ -2,9 +2,10 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs-extra');
 const multer = require('multer');
-const { loadRooms, loadFaculty, loadTimeSlots, loadAllCourses } = require('./src/dataLoader');
+const { loadRooms, loadFaculty, loadTimeSlots, loadAllCourses, loadStudents } = require('./src/dataLoader');
 const { generateTimetable } = require('./src/timetable');
-const { validateTimetable, validateExamSchedule } = require('./src/validator');
+const { validateTimetable, validateExamSchedule, validateAll } = require('./src/validator');
+const { resolveEnrollments, getEnrollmentStats, generateEnrollmentReport } = require('./src/enrollmentResolver');
 const { exportTimetable } = require('./src/exportTimetable');
 const { generateExamSchedule } = require('./src/exam');
 const { exportExamSchedule } = require('./src/exportExam');
@@ -83,15 +84,19 @@ app.get('/api/data', async (req, res) => {
 // GET /api/validate - Generates and validates timetable
 app.get('/api/validate', async (req, res) => {
   try {
-    const [rooms, faculty, timeSlots, courses] = await Promise.all([
+    const [rooms, faculty, timeSlots, courses, studentsData] = await Promise.all([
       loadRooms(),
       loadFaculty(),
       loadTimeSlots(),
-      loadAllCourses()
+      loadAllCourses(),
+      loadStudents()
     ]);
 
-    const timetable = generateTimetable(courses, rooms, timeSlots);
-    const validation = validateTimetable(timetable, courses);
+    // Resolve actual enrollments from students.csv
+    const { courses: resolvedCourses } = resolveEnrollments(courses, studentsData.courseMap);
+
+    const timetable = generateTimetable(resolvedCourses, rooms, timeSlots);
+    const validation = validateAll(timetable, resolvedCourses, rooms, timeSlots);
 
     // Calculate room utilization
     const roomUtilization = calculateRoomUtilization(timetable, rooms);
@@ -101,14 +106,76 @@ app.get('/api/validate', async (req, res) => {
       validation,
       summary: {
         totalEntries: timetable.length,
-        totalConflicts: validation.conflicts.length,
-        totalMissingHours: validation.missingHours.length,
+        totalConflicts: validation.errors.length,
+        totalWarnings: validation.warnings.length,
+        totalInfo: validation.info.length,
         isValid: validation.valid
       },
-      roomUtilization
+      roomUtilization,
+      stats: validation.stats
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/enrollment-report - Returns enrollment discrepancy report
+app.get('/api/enrollment-report', async (req, res) => {
+  try {
+    const [courses, studentsData] = await Promise.all([
+      loadAllCourses(),
+      loadStudents()
+    ]);
+
+    const { courses: resolvedCourses, discrepancies } = resolveEnrollments(courses, studentsData.courseMap);
+    const stats = getEnrollmentStats(resolvedCourses, studentsData.courseMap);
+    const report = generateEnrollmentReport(resolvedCourses, discrepancies);
+
+    res.json({
+      success: true,
+      stats,
+      report,
+      discrepancies
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET /api/comprehensive-validation - Full validation with all details
+app.get('/api/comprehensive-validation', async (req, res) => {
+  try {
+    const [rooms, faculty, timeSlots, courses, studentsData] = await Promise.all([
+      loadRooms(),
+      loadFaculty(),
+      loadTimeSlots(),
+      loadAllCourses(),
+      loadStudents()
+    ]);
+
+    // Resolve actual enrollments
+    const { courses: resolvedCourses, discrepancies: enrollmentDiscrepancies } = resolveEnrollments(courses, studentsData.courseMap);
+
+    const timetable = generateTimetable(resolvedCourses, rooms, timeSlots);
+    const validation = validateAll(timetable, resolvedCourses, rooms, timeSlots);
+
+    // Add enrollment discrepancies to warnings
+    if (enrollmentDiscrepancies.length > 0) {
+      validation.warnings.push({
+        type: 'ENROLLMENT_DISCREPANCY',
+        description: `${enrollmentDiscrepancies.length} courses have enrollment discrepancies between CSV and students.csv`,
+        affected: { discrepancies: enrollmentDiscrepancies }
+      });
+    }
+
+    res.json({
+      success: true,
+      validation,
+      enrollmentStats: getEnrollmentStats(resolvedCourses, studentsData.courseMap),
+      enrollmentReport: generateEnrollmentReport(resolvedCourses, enrollmentDiscrepancies)
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -416,6 +483,17 @@ app.get('/api/health', async (req, res) => {
       status: 'error',
       error: error.message
     });
+  }
+});
+
+// GET /api/slots/preview - Generate time slots preview from saved config
+app.get('/api/slots/preview', async (req, res) => {
+  try {
+    const config = await fs.readJson(path.join(DATA_DIR, 'time_slots.json'));
+    const result = generateTimeSlots(config);
+    res.json({ slots: result.slots, breakSlots: result.breakSlots });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 

@@ -8,7 +8,17 @@ const generateTimetableBtn = document.getElementById('generate-timetable-btn');
 const generateExamBtn = document.getElementById('generate-exam-btn');
 const generateFacultyBtn = document.getElementById('generate-faculty-btn');
 const validateBtn = document.getElementById('validate-btn');
+const downloadReportBtn = document.getElementById('download-report-btn');
 const examStartDate = document.getElementById('exam-start-date');
+
+// Validation dashboard elements
+const validationDashboard = document.getElementById('validation-dashboard');
+const errorsContainer = document.getElementById('errors-container');
+const warningsContainer = document.getElementById('warnings-container');
+const statsContainer = document.getElementById('stats-container');
+const basketsContainer = document.getElementById('baskets-container');
+const errorsCount = document.getElementById('errors-count');
+const warningsCount = document.getElementById('warnings-count');
 
 const fileList = document.getElementById('file-list');
 const resultsContainer = document.getElementById('results-container');
@@ -318,16 +328,18 @@ async function generateFaculty() {
 // ========== Validation Functions ==========
 
 validateBtn.addEventListener('click', runValidation);
+downloadReportBtn.addEventListener('click', downloadFullReport);
 
 async function runValidation() {
   setLoading(true);
 
   try {
-    const response = await fetch('/api/validate');
+    const response = await fetch('/api/comprehensive-validation');
     const data = await response.json();
 
-    if (data.validation) {
-      displayValidationResults(data.validation, data.roomUtilization);
+    if (data.success && data.validation) {
+      displayValidationDashboard(data.validation, data.enrollmentStats, data.enrollmentReport);
+      downloadReportBtn.disabled = false;
     } else {
       showResult('Validation failed to run.', 'error');
     }
@@ -337,6 +349,307 @@ async function runValidation() {
     setLoading(false);
   }
 }
+
+function displayValidationDashboard(validation, enrollmentStats, enrollmentReport) {
+  const { errors, warnings, info, stats } = validation;
+
+  // Show dashboard
+  validationDashboard.style.display = 'block';
+
+  // Update counts
+  errorsCount.textContent = errors.length;
+  warningsCount.textContent = warnings.length;
+
+  // Display errors
+  if (errors.length === 0) {
+    errorsContainer.innerHTML = '<div class="empty-state">No errors found! Your timetable is valid.</div>';
+  } else {
+    errorsContainer.innerHTML = `
+      <div class="error-summary">Found ${errors.length} error(s) that need to be fixed:</div>
+      ${errors.map(err => `
+        <div class="validation-item error">
+          <div class="item-header">
+            <span class="item-type">${err.type || 'ERROR'}</span>
+            <span class="item-description">${err.description}</span>
+          </div>
+          ${err.affected ? `<div class="item-details">${JSON.stringify(err.affected, null, 2)}</div>` : ''}
+        </div>
+      `).join('')}
+    `;
+  }
+
+  // Display warnings
+  if (warnings.length === 0) {
+    warningsContainer.innerHTML = '<div class="empty-state">No warnings found!</div>';
+  } else {
+    warningsContainer.innerHTML = `
+      <div class="warning-summary">Found ${warnings.length} warning(s):</div>
+      ${warnings.map(warn => `
+        <div class="validation-item warning">
+          <div class="item-header">
+            <span class="item-type">${warn.type || 'WARNING'}</span>
+            <span class="item-description">${warn.description}</span>
+          </div>
+          ${warn.affected ? `<div class="item-details">${JSON.stringify(warn.affected, null, 2)}</div>` : ''}
+        </div>
+      `).join('')}
+    `;
+  }
+
+  // Display statistics
+  statsContainer.innerHTML = `
+    <div class="stats-grid">
+      <div class="stat-card">
+        <h4>Overview</h4>
+        <div class="stat-row">
+          <span class="stat-label">Total Entries:</span>
+          <span class="stat-value">${stats.totalEntries}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Unique Courses:</span>
+          <span class="stat-value">${stats.uniqueCourses}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Room Utilization:</span>
+          <span class="stat-value">${stats.averageRoomUtilization}%</span>
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <h4>Course Type Distribution</h4>
+        <div class="stat-row">
+          <span class="stat-label">Lectures (L):</span>
+          <span class="stat-value">${stats.courseTypeDistribution.L}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Tutorials (T):</span>
+          <span class="stat-value">${stats.courseTypeDistribution.T}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Practicals (P):</span>
+          <span class="stat-value">${stats.courseTypeDistribution.P}</span>
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <h4>Semester Half Distribution</h4>
+        <div class="stat-row">
+          <span class="stat-label">Full Semester:</span>
+          <span class="stat-value">${stats.semesterHalfDistribution.full}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">First Half (H1):</span>
+          <span class="stat-value">${stats.semesterHalfDistribution.h1}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Second Half (H2):</span>
+          <span class="stat-value">${stats.semesterHalfDistribution.h2}</span>
+        </div>
+      </div>
+
+      <div class="stat-card">
+        <h4>Enrollment Statistics</h4>
+        <div class="stat-row">
+          <span class="stat-label">Avg Enrollment:</span>
+          <span class="stat-value">${enrollmentStats.averageEnrollment}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Max Enrollment:</span>
+          <span class="stat-value">${enrollmentStats.maxEnrollment}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">Min Enrollment:</span>
+          <span class="stat-value">${enrollmentStats.minEnrollment}</span>
+        </div>
+      </div>
+    </div>
+
+    <h4>Room Utilization Details</h4>
+    <table class="stats-table">
+      <thead>
+        <tr>
+          <th>Room</th>
+          <th>Capacity</th>
+          <th>Slots Used</th>
+          <th>Utilization %</th>
+          <th>Avg Enrollment</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${Object.entries(stats.roomUtilization).map(([roomId, data]) => `
+          <tr>
+            <td>${data.room_name}</td>
+            <td>${data.capacity}</td>
+            <td>${data.slots_used}</td>
+            <td><span class="utilization-badge ${getUtilizationClass(data.utilization_percentage)}">${data.utilization_percentage}%</span></td>
+            <td>${data.average_enrollment}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+
+    <h4>Faculty Load Summary</h4>
+    <table class="stats-table">
+      <thead>
+        <tr>
+          <th>Faculty ID</th>
+          <th>Total Hours</th>
+          <th>Courses</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${Object.entries(stats.facultyLoad).map(([fid, load]) => `
+          <tr>
+            <td>${fid}</td>
+            <td>${load.hours.toFixed(1)}</td>
+            <td>${load.courses.join(', ')}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+
+    <h4>Section Hours Summary</h4>
+    <table class="stats-table">
+      <thead>
+        <tr>
+          <th>Section</th>
+          <th>Semester Half</th>
+          <th>L Hours</th>
+          <th>T Hours</th>
+          <th>P Hours</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${Object.entries(stats.sectionHours).map(([key, data]) => `
+          <tr>
+            <td>${data.section}</td>
+            <td>${data.semester_half === 0 ? 'Full' : data.semester_half === 1 ? 'H1' : 'H2'}</td>
+            <td>${data.L.toFixed(1)}</td>
+            <td>${data.T.toFixed(1)}</td>
+            <td>${data.P.toFixed(1)}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+
+  // Display elective baskets
+  if (enrollmentReport && enrollmentReport.coursesBySection) {
+    basketsContainer.innerHTML = `
+      <h4>Enrollment by Section</h4>
+      <table class="stats-table">
+        <thead>
+          <tr>
+            <th>Section</th>
+            <th>Total Courses</th>
+            <th>Total Enrollment</th>
+            <th>Average Enrollment</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${Object.entries(enrollmentReport.coursesBySection).map(([section, data]) => `
+            <tr>
+              <td>${section}</td>
+              <td>${data.totalCourses}</td>
+              <td>${data.totalEnrollment}</td>
+              <td>${data.averageEnrollment}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+
+      ${enrollmentReport.discrepancies && enrollmentReport.discrepancies.length > 0 ? `
+        <h4>Enrollment Discrepancies</h4>
+        <table class="stats-table">
+          <thead>
+            <tr>
+              <th>Course</th>
+              <th>Section</th>
+              <th>CSV Enrollment</th>
+              <th>Actual Enrollment</th>
+              <th>Difference</th>
+              <th>Discrepancy %</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${enrollmentReport.discrepancies.map(d => `
+              <tr>
+                <td>${d.course_code}</td>
+                <td>${d.section}</td>
+                <td>${d.csv_enrollment}</td>
+                <td>${d.actual_enrollment}</td>
+                <td class="${d.difference > 0 ? 'positive' : 'negative'}">${d.difference > 0 ? '+' : ''}${d.difference}</td>
+                <td>${d.discrepancy_percentage > 0 ? '+' : ''}${d.discrepancy_percentage}%</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      ` : '<div class="empty-state">No enrollment discrepancies found!</div>'}
+    `;
+  }
+
+  // Setup tab switching
+  setupTabSwitching();
+}
+
+function setupTabSwitching() {
+  const tabBtns = document.querySelectorAll('.tab-btn');
+  const tabPanes = document.querySelectorAll('.tab-pane');
+
+  tabBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const targetTab = btn.getAttribute('data-tab');
+
+      // Remove active class from all buttons and panes
+      tabBtns.forEach(b => b.classList.remove('active'));
+      tabPanes.forEach(p => p.classList.remove('active'));
+
+      // Add active class to selected tab
+      btn.classList.add('active');
+      document.getElementById(targetTab).classList.add('active');
+    });
+  });
+}
+
+function getUtilizationClass(percentage) {
+  if (percentage > 60) return 'high';
+  if (percentage >= 40) return 'medium';
+  return 'low';
+}
+
+async function downloadFullReport() {
+  try {
+    const response = await fetch('/api/comprehensive-validation');
+    const data = await response.json();
+
+    if (data.success) {
+      // Create a downloadable report
+      const reportContent = {
+        validation: data.validation,
+        enrollmentStats: data.enrollmentStats,
+        enrollmentReport: data.enrollmentReport,
+        generatedAt: new Date().toISOString()
+      };
+
+      // Download as JSON
+      const blob = new Blob([JSON.stringify(reportContent, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `validation-report-${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      showResult('Full validation report downloaded successfully!', 'success');
+    }
+  } catch (error) {
+    showResult(`Download failed: ${error.message}`, 'error');
+  }
+}
+
+// ========== Legacy Validation Function (kept for backward compatibility) ==========
 
 function displayValidationResults(validation, roomUtilization) {
   const { conflicts, missingHours, valid } = validation;

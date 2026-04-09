@@ -1,8 +1,0 @@
-room_id,name,capacity,type,equipment
-C104,Room C104,96,classroom,"Whiteboard,Display Screen"
-C202,Room C202,96,classroom,"Whiteboard,Display Screen"
-L105,Lab L105,96,lab,"Hardware,Whiteboard"
-L106,Lab L106,96,lab,"Computers,Whiteboard"
-L107,Lab L107,96,lab,"Computers,Whiteboard"
-H301,Hall H301,130,hall,"Whiteboard,Display Screen"
-H302,Hall H302,240,hall,"Whiteboard,Display Screen,Audio System"
